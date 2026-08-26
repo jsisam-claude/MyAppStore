@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        Cleartext is refused outright, and only CAs shipped with the OS are
+        trusted: a CA installed by the user (or pushed by an MDM) must not be
+        able to observe repository traffic, since that traffic carries the
+        repository access key.
+
+        Repository integrity does not depend on TLS. The metadata is signed with
+        the repository's Ed25519 key and every APK is checked against a SHA-256
+        digest taken from that signed metadata, so a TLS compromise cannot cause
+        a modified APK to be installed. TLS protects confidentiality and the
+        access key.
+
+        Certificate pinning is therefore optional. If you want it anyway, add a
+        block like the one below with your own leaf/intermediate SPKI hashes.
+        Note that a pin-set that expires or a certificate rotated without
+        updating the app will stop every client from receiving updates.
+
+        <domain-config>
+            <domain includeSubdomains="true">apps.example.com</domain>
+            <pin-set expiration="2030-01-01">
+                <pin digest="SHA-256">BASE64_SPKI_HASH_OF_YOUR_CA</pin>
+                <pin digest="SHA-256">BASE64_SPKI_HASH_OF_YOUR_BACKUP</pin>
+            </pin-set>
+        </domain-config>
+
+        `appstore-nginx --print-pins` computes those values from the deployed
+        certificate chain.
+    -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Apps.DayNight" parent="Theme.Apps.Dark" />
+
+    <style name="Theme.Apps.Dark" parent="Theme.Apps">
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

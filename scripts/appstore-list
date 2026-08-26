@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# Show what the repository contains and whether it matches what is published.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+load_config
+
+if [ ! -d "$APPS_DIR" ] || [ -z "$(ls -A "$APPS_DIR" 2>/dev/null)" ]; then
+    info "no packages yet. Add one with appstore-add."
+    exit 0
+fi
+
+published="$(metadata_path)"
+published_time="(not published)"
+if [ -f "$published" ]; then
+    published_time="$(python3 "$LIB_DIR/sjson.py" time --file "$published" 2>/dev/null || echo unknown)"
+    if [ "$published_time" != unknown ]; then
+        published_time="$(date -u -d "@$published_time" '+%Y-%m-%d %H:%M:%SZ' 2>/dev/null || echo "$published_time")"
+    fi
+fi
+
+printf '%-40s %-12s %-9s %s\n' "PACKAGE / VERSION" "VERSION" "CHANNEL" "LABEL" >&2
+
+for package_dir in "$APPS_DIR"/*/; do
+    [ -d "$package_dir" ] || continue
+    package="$(basename "$package_dir")"
+    [ -f "$package_dir/package.json" ] || continue
+    printf '%s\n' "$package" >&2
+
+    variants_dir="$package_dir/variants"
+    [ -d "$variants_dir" ] || { printf '    %s\n' "(no versions)" >&2; continue; }
+
+    for variant in "$variants_dir"/*.json; do
+        [ -f "$variant" ] || continue
+        version_code="$(basename "$variant" .json)"
+        label="$(python3 "$LIB_DIR/fragment.py" get --file "$variant" --key label 2>/dev/null || echo '?')"
+        version_name="$(python3 "$LIB_DIR/fragment.py" get --file "$variant" --key versionName 2>/dev/null || echo "$version_code")"
+        channel="$(python3 "$LIB_DIR/fragment.py" get --file "$variant" --key channel 2>/dev/null || echo stable)"
+        printf '    %-36s %-12s %-9s %s\n' "$version_code" "$version_name" "$channel" "$label" >&2
+    done
+done
+
+info ""
+detail "published: $published_time"
+detail "web root:  $APPSTORE_WWW"
+detail "base url:  $APPSTORE_BASE_URL"

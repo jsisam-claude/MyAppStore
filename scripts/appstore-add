@@ -1,0 +1,291 @@
+#!/bin/bash
+#
+# Add one version of one package to the repository.
+#
+# Pass the base APK plus any split APKs that belong with it. Nothing becomes
+# visible to clients until appstore-publish signs new metadata.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+usage: appstore-add [options] <base.apk> [split.apk ...]
+
+Options:
+  --label NAME            display name (required unless aapt2 is installed or
+                          the package already has one)
+  --description TEXT      package description
+  --release-notes TEXT    release notes for this version
+  --channel CHANNEL       stable, beta or alpha (default: stable)
+  --source NAME           $VALID_SOURCES (default: GrapheneOS_build)
+  --icon FILE             package icon (.png, .webp or .jpg)
+  --abi ABI               restrict this version to an ABI (repeatable)
+  --self-updating         set optOutOfBulkUpdates; use for the store's own package
+  --expect-cert SHA256    require this signing certificate digest
+  --allow-signer-change   accept a signer that differs from previous versions
+  --replace               overwrite this version if it already exists
+EOF
+    exit "${1:-1}"
+}
+
+label=""
+description=""
+release_notes=""
+channel="stable"
+source_name=""
+icon=""
+abis=()
+self_updating=0
+expect_cert=""
+allow_signer_change=0
+replace=0
+inputs=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --label) label="${2:-}"; shift 2 ;;
+        --description) description="${2:-}"; shift 2 ;;
+        --release-notes) release_notes="${2:-}"; shift 2 ;;
+        --channel) channel="${2:-}"; shift 2 ;;
+        --source) source_name="${2:-}"; shift 2 ;;
+        --icon) icon="${2:-}"; shift 2 ;;
+        --abi) abis+=("${2:-}"); shift 2 ;;
+        --self-updating) self_updating=1; shift ;;
+        --expect-cert) expect_cert="${2:-}"; shift 2 ;;
+        --allow-signer-change) allow_signer_change=1; shift ;;
+        --replace) replace=1; shift ;;
+        -h|--help) usage 0 ;;
+        --) shift; inputs+=("$@"); break ;;
+        -*) die "unknown option: $1 (try --help)" ;;
+        *) inputs+=("$1"); shift ;;
+    esac
+done
+
+[ "${#inputs[@]}" -gt 0 ] || usage
+need_cmd python3
+need_cmd gzip
+need_cmd sha256sum
+load_config
+
+# shellcheck disable=SC2076
+[[ " $VALID_CHANNELS " =~ " $channel " ]] || die "--channel must be one of: $VALID_CHANNELS"
+if [ -n "$source_name" ]; then
+    # shellcheck disable=SC2076
+    [[ " $VALID_SOURCES " =~ " $source_name " ]] || die "--source must be one of: $VALID_SOURCES"
+fi
+if [ -n "$expect_cert" ]; then
+    [[ "$expect_cert" =~ ^[0-9a-f]{64}$ ]] || die "--expect-cert must be 64 lowercase hex characters"
+fi
+
+# --- inspect every input ----------------------------------------------------
+
+package=""
+version_code=""
+version_name=""
+min_sdk=""
+manifest_label=""
+cert_digests=""
+have_base=0
+served_names=()
+apk_paths=()
+
+for apk in "${inputs[@]}"; do
+    [ -f "$apk" ] || die "no such file: $apk"
+    apk_facts="$(python3 "$LIB_DIR/apkinfo.py" --shell "$apk")" ||
+        die "could not read $apk"
+    eval "$apk_facts"
+
+    [ -n "$APK_SIGNATURE_SCHEME" ] ||
+        die "$apk is not signed with APK signature scheme v2 or newer. Android 11 and later require it."
+
+    if [ -z "$package" ]; then
+        package="$APK_PACKAGE"
+        version_code="$APK_VERSION_CODE"
+        cert_digests="$APK_CERT_DIGESTS"
+    else
+        [ "$APK_PACKAGE" = "$package" ] ||
+            die "$apk is $APK_PACKAGE but the first APK is $package"
+        [ "$APK_VERSION_CODE" = "$version_code" ] ||
+            die "$apk is versionCode $APK_VERSION_CODE but the first APK is $version_code"
+        [ "$APK_CERT_DIGESTS" = "$cert_digests" ] ||
+            die "$apk is signed by a different certificate than the other APKs; splits must share a signer"
+    fi
+
+    if [ -z "$APK_SPLIT" ]; then
+        [ "$have_base" = 0 ] || die "more than one base APK was given"
+        have_base=1
+        name="base.apk"
+        version_name="$APK_VERSION_NAME"
+        min_sdk="$APK_MIN_SDK"
+        manifest_label="$APK_LABEL"
+    else
+        [[ "$APK_SPLIT" =~ ^[A-Za-z0-9._]+$ ]] || die "unsupported split name: $APK_SPLIT"
+        name="split_${APK_SPLIT}.apk"
+    fi
+
+    served_names+=("$name")
+    apk_paths+=("$apk")
+done
+
+[ "$have_base" = 1 ] || die "none of the given APKs is a base APK (they all declare a split name)"
+is_package_name "$package" || die "implausible package name: $package"
+is_version_code "$version_code" || die "implausible versionCode: $version_code"
+
+# --- signature checks -------------------------------------------------------
+
+if command -v apksigner >/dev/null 2>&1; then
+    for apk in "${apk_paths[@]}"; do
+        apksigner verify --min-sdk-version "${min_sdk:-31}" -- "$apk" >/dev/null 2>&1 ||
+            die "apksigner rejected $apk: its signature does not verify"
+    done
+    detail "apksigner verified ${#apk_paths[@]} APK(s)"
+else
+    warn "apksigner is not installed, so APK signatures were read but not verified."
+    warn "Install Android build-tools for a full check before publishing."
+fi
+
+if [ -n "$expect_cert" ]; then
+    # shellcheck disable=SC2076
+    [[ " $cert_digests " =~ " $expect_cert " ]] ||
+        die "signing certificate mismatch: expected $expect_cert, APK has: $cert_digests"
+fi
+
+package_file="$APPS_DIR/$package/package.json"
+if [ -f "$package_file" ]; then
+    known="$(python3 "$LIB_DIR/fragment.py" get --file "$package_file" --key signatures | tr '\n' ' ')" || known=""
+    if [ -n "$known" ]; then
+        matched=0
+        for digest in $cert_digests; do
+            # shellcheck disable=SC2076
+            [[ " $known " =~ " $digest " ]] && matched=1
+        done
+        if [ "$matched" = 0 ]; then
+            # Android refuses an update signed by a different key, so this would
+            # ship a version no device could install over the previous one.
+            if [ "$allow_signer_change" = 1 ]; then
+                warn "signer changed for $package; recording the new certificate as well"
+                cert_digests="$known $cert_digests"
+            else
+                die "$package is already published with signing certificate(s): $known
+    but this APK is signed by: $cert_digests
+    Devices cannot install an update signed by a different key. Pass
+    --allow-signer-change only if you know the signing key was rotated."
+            fi
+        fi
+    fi
+fi
+
+# --- label ------------------------------------------------------------------
+
+variant_file="$APPS_DIR/$package/variants/$version_code.json"
+if [ -z "$label" ] && command -v aapt2 >/dev/null 2>&1; then
+    # Deliberately no `| head -1` here: under pipefail, head closing the pipe
+    # early makes the whole pipeline report failure.
+    badging="$(aapt2 dump badging "${apk_paths[0]}" 2>/dev/null)" || badging=""
+    matches="$(printf '%s\n' "$badging" |
+               sed -n "s/^application-label:'\(.*\)'\$/\1/p")" || matches=""
+    label="${matches%%$'\n'*}"
+fi
+[ -n "$label" ] || label="$manifest_label"
+if [ -z "$label" ] && [ -f "$variant_file" ]; then
+    label="$(python3 "$LIB_DIR/fragment.py" get --file "$variant_file" --key label)" || label=""
+fi
+[ -n "$label" ] ||
+    die "could not determine a display name for $package. Pass --label, or install aapt2."
+
+# --- artifacts --------------------------------------------------------------
+
+dest="$APPSTORE_WWW/packages/$package/$version_code"
+if [ -d "$dest" ] && [ "$replace" = 0 ]; then
+    die "$package versionCode $version_code already exists. Pass --replace to overwrite it."
+fi
+
+mkdir -p "$dest"
+chmod 755 "$APPSTORE_WWW/packages/$package" "$dest"
+
+# hasV4Signatures is all-or-nothing: the client fetches an .idsig for every APK
+# in the version, so a partial set would fail mid-install.
+have_v4=1
+for apk in "${apk_paths[@]}"; do
+    [ -f "$apk.idsig" ] || have_v4=0
+done
+
+apk_args=()
+for index in "${!apk_paths[@]}"; do
+    apk="${apk_paths[$index]}"
+    name="${served_names[$index]}"
+
+    size="$(stat -c%s "$apk")"
+    digest="$(sha256sum -- "$apk" | cut -d' ' -f1)"
+
+    # Served pre-compressed and byte-exact: the client requests these with
+    # Accept-Encoding: identity, resumes against the recorded compressed size,
+    # and checks the decompressed stream against the digest. -n keeps the output
+    # reproducible by leaving out the name and mtime.
+    staged="$(tmpfile gz)"
+    gzip -9 -n -c -- "$apk" > "$staged"
+    gz_size="$(stat -c%s "$staged")"
+    install_atomically "$staged" "$dest/$name.gz"
+
+    if [ "$have_v4" = 1 ]; then
+        cp -- "$apk.idsig" "$dest/$name.idsig.tmp"
+        install_atomically "$dest/$name.idsig.tmp" "$dest/$name.idsig"
+    else
+        rm -f -- "$dest/$name.idsig"
+    fi
+
+    apk_args+=(--apk "$name:$digest:$size:$gz_size")
+    detail "  $name  $(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size bytes") -> $(numfmt --to=iec --suffix=B "$gz_size" 2>/dev/null || echo "$gz_size bytes")"
+done
+
+icon_type=""
+if [ -n "$icon" ]; then
+    [ -f "$icon" ] || die "no such icon file: $icon"
+    case "$icon" in
+        *.png) icon_type="png" ;;
+        *.webp) icon_type="webp" ;;
+        *.jpg|*.jpeg) icon_type="jpg" ;;
+        *) die "--icon must be a .png, .webp or .jpg file" ;;
+    esac
+    staged="$(tmpfile icon)"
+    cp -- "$icon" "$staged"
+    install_atomically "$staged" "$APPSTORE_WWW/packages/$package/icon.$icon_type"
+fi
+
+# --- fragments --------------------------------------------------------------
+
+package_args=()
+for digest in $cert_digests; do
+    package_args+=(--signature "$digest")
+done
+if [ -n "$description" ]; then package_args+=(--description "$description"); fi
+if [ -n "$source_name" ]; then package_args+=(--source "$source_name"); fi
+if [ -n "$icon_type" ]; then package_args+=(--icon-type "$icon_type"); fi
+if [ "$self_updating" = 1 ]; then package_args+=(--opt-out-of-bulk-updates true); fi
+
+python3 "$LIB_DIR/fragment.py" package --file "$package_file" "${package_args[@]}" ||
+    die "failed to write $package_file"
+
+variant_args=(--label "$label" --channel "$channel" "${apk_args[@]}")
+if [ -n "$version_name" ]; then variant_args+=(--version-name "$version_name"); fi
+if [ -n "$min_sdk" ]; then variant_args+=(--min-sdk "$min_sdk"); fi
+if [ -n "$release_notes" ]; then variant_args+=(--release-notes "$release_notes"); fi
+if [ "$have_v4" = 1 ]; then variant_args+=(--has-v4 true); else variant_args+=(--has-v4 false); fi
+for abi in "${abis[@]}"; do
+    variant_args+=(--abi "$abi")
+done
+
+python3 "$LIB_DIR/fragment.py" variant --file "$variant_file" "${variant_args[@]}" ||
+    die "failed to write $variant_file"
+
+info "added $package versionCode $version_code (\"$label\", $channel)"
+if [ "$have_v4" = 1 ]; then
+    detail "  v4 signatures included, fs-verity will be enabled on SDK 35+"
+fi
+detail "  metadata  $variant_file"
+detail "  artifacts $dest"
+info ""
+info "Run appstore-publish to make this visible to clients."

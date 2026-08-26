@@ -1,0 +1,181 @@
+#!/bin/bash
+#
+# Create a repository: directory layout, signing key, first access key, config.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+usage: appstore-init --url https://apps.example.com [options]
+
+Options:
+  --url URL           base URL clients will fetch from (required, https only)
+  --www DIR           directory nginx serves (default: /var/www/appstore)
+  --key-version N     signing key version, part of the metadata filename (default: 0)
+  --auth-header NAME  access key header name (default: X-AppStore-Key)
+  --no-access-key     serve without the phase 1 access key gate
+  --no-passphrase     do not encrypt the signing key on disk
+
+Environment:
+  APPSTORE_HOME             repository state (default: /var/lib/appstore)
+  APPSTORE_KEY_PASSPHRASE   passphrase to use instead of prompting
+EOF
+    exit "${1:-1}"
+}
+
+url=""
+www="/var/www/appstore"
+key_version="0"
+auth_header="X-AppStore-Key"
+want_access_key=1
+want_passphrase=1
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --url) url="${2:-}"; shift 2 ;;
+        --www) www="${2:-}"; shift 2 ;;
+        --key-version) key_version="${2:-}"; shift 2 ;;
+        --auth-header) auth_header="${2:-}"; shift 2 ;;
+        --no-access-key) want_access_key=0; shift ;;
+        --no-passphrase) want_passphrase=0; shift ;;
+        -h|--help) usage 0 ;;
+        *) die "unknown argument: $1 (try --help)" ;;
+    esac
+done
+
+[ -n "$url" ] || usage
+need_cmd openssl
+need_cmd base64
+
+case "$url" in
+    https://*) ;;
+    *) die "--url must start with https://; the client refuses plaintext" ;;
+esac
+url="${url%/}"
+[[ "$key_version" =~ ^[0-9]+$ ]] || die "--key-version must be a decimal number"
+[[ "$auth_header" =~ ^[A-Za-z0-9!#$%\&\'*+.^_\`|~-]+$ ]] || die "--auth-header is not a valid header name"
+case "$www" in /*) ;; *) die "--www must be an absolute path" ;; esac
+
+[ -e "$CONFIG_FILE" ] && die "$CONFIG_FILE already exists; refusing to overwrite an existing repository"
+
+umask 077
+mkdir -p "$APPSTORE_HOME" "$KEYS_DIR" "$APPS_DIR"
+chmod 750 "$APPSTORE_HOME"
+chmod 700 "$KEYS_DIR"
+chmod 750 "$APPS_DIR"
+mkdir -p "$www/packages"
+chmod 755 "$www" "$www/packages"
+
+# --- signing key ------------------------------------------------------------
+#
+# signify key layout, which is what the client's FileVerifier expects:
+#   public blob  = "Ed" + 8 byte key id + 32 byte Ed25519 public key
+#   signature    = "Ed" + 8 byte key id + 64 byte Ed25519 signature
+#
+# The private key is a standard PKCS#8 PEM. When a passphrase is set it never
+# reaches the command line, the environment of another process, or the disk in
+# plaintext: the key is generated into a pipe and encrypted in the same step.
+
+passphrase=""
+if [ "$want_passphrase" = 1 ]; then
+    if [ -n "${APPSTORE_KEY_PASSPHRASE:-}" ]; then
+        passphrase="$APPSTORE_KEY_PASSPHRASE"
+    else
+        [ -r /dev/tty ] || die "no terminal to prompt on. Use --no-passphrase or set APPSTORE_KEY_PASSPHRASE."
+        printf 'Passphrase for the new signing key: ' >&2
+        IFS= read -rs passphrase < /dev/tty
+        printf '\n' >&2
+        printf 'Repeat passphrase: ' >&2
+        IFS= read -rs confirm < /dev/tty
+        printf '\n' >&2
+        [ "$passphrase" = "$confirm" ] || die "passphrases do not match"
+    fi
+    [ -n "$passphrase" ] ||
+        die "empty passphrase. Pass --no-passphrase if that is really what you want."
+fi
+
+info "Generating Ed25519 repository signing key..."
+if [ -n "$passphrase" ]; then
+    openssl genpkey -algorithm ed25519 2>/dev/null |
+        openssl pkcs8 -topk8 -v2 aes-256-cbc -passout fd:3 -out "$SECRET_KEY_FILE" 3<<<"$passphrase"
+else
+    openssl genpkey -algorithm ed25519 -out "$SECRET_KEY_FILE" 2>/dev/null
+fi
+chmod 600 "$SECRET_KEY_FILE"
+
+openssl rand -out "$KEYID_FILE" 8
+chmod 600 "$KEYID_FILE"
+
+raw_pub="$(tmpfile pub)"
+if [ -n "$passphrase" ]; then
+    openssl pkey -in "$SECRET_KEY_FILE" -passin fd:3 -pubout -outform DER 3<<<"$passphrase" |
+        tail -c 32 > "$raw_pub"
+else
+    openssl pkey -in "$SECRET_KEY_FILE" -pubout -outform DER | tail -c 32 > "$raw_pub"
+fi
+[ "$(stat -c%s "$raw_pub")" = 32 ] || die "failed to derive the public key"
+{ printf 'Ed'; cat -- "$KEYID_FILE"; cat -- "$raw_pub"; } | base64 -w0 > "$PUBLIC_KEY_FILE"
+chmod 644 "$PUBLIC_KEY_FILE"
+public_key="$(cat "$PUBLIC_KEY_FILE")"
+[ "${#public_key}" = 56 ] || die "unexpected public key length: ${#public_key}"
+
+# --- access key -------------------------------------------------------------
+
+: > "$ACCESS_KEYS_FILE"
+chmod 600 "$ACCESS_KEYS_FILE"
+access_key=""
+if [ "$want_access_key" = 1 ]; then
+    access_key="$(openssl rand -hex 32)"
+    printf '%s\tdefault\t%s\n' "$access_key" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$ACCESS_KEYS_FILE"
+fi
+
+# --- config -----------------------------------------------------------------
+
+server_name="${url#https://}"
+server_name="${server_name%%/*}"
+
+cat > "$CONFIG_FILE" <<EOF
+# Repository configuration. Plain KEY=VALUE, parsed rather than sourced.
+APPSTORE_BASE_URL=$url
+APPSTORE_WWW=$www
+APPSTORE_KEY_VERSION=$key_version
+APPSTORE_AUTH_HEADER=$auth_header
+APPSTORE_SERVER_NAME=$server_name
+APPSTORE_NGINX_KEYS_FILE=$APPSTORE_HOME/access-keys.conf
+APPSTORE_ACCESS_KEY_REQUIRED=$want_access_key
+EOF
+chmod 640 "$CONFIG_FILE"
+
+load_config
+"$SCRIPT_DIR/appstore-key" sync
+
+info ""
+info "Repository initialised at $APPSTORE_HOME"
+detail "  config       $CONFIG_FILE"
+detail "  signing key  $SECRET_KEY_FILE ($([ -n "$passphrase" ] && echo "passphrase-protected" || echo "NOT encrypted"))"
+detail "  public key   $public_key"
+detail "  web root     $www"
+info ""
+if [ "$want_passphrase" = 0 ]; then
+    warn "The signing key is stored unencrypted. Anyone who can read it can publish"
+    warn "updates to every device using this repository. Keep it off the web server if you can."
+fi
+info "Next steps:"
+detail "  1. appstore-nginx --install /etc/nginx/sites-available/appstore"
+detail "  2. appstore-add /path/to/app.apk --label 'App Name'"
+detail "  3. appstore-publish"
+detail "  4. appstore-client-config > client/repo.properties   (then build the client)"
+if [ -n "$access_key" ]; then
+    info ""
+    info "Access key (clients must send it in the $auth_header header):"
+    detail "  $access_key"
+fi
+
+# Back up the signing key: losing it means every installed client stops
+# accepting updates, because the public key is compiled into the app.
+info ""
+warn "Back up $KEYS_DIR now. Losing the signing key means rebuilding and"
+warn "reinstalling the client on every device."

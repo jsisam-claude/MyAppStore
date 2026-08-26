@@ -1,0 +1,137 @@
+#!/bin/bash
+#
+# Rebuild the metadata document, sign it, and install it atomically.
+#
+# This is the only step that makes a change visible to clients, and the only one
+# that needs the signing key.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+usage: appstore-publish [options]
+
+Options:
+  --prune       delete artifacts in the web root the new metadata does not
+                reference (run after appstore-rm)
+  --dry-run     build and validate, but do not sign or install
+EOF
+    exit "${1:-1}"
+}
+
+prune=0
+dry_run=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prune) prune=1; shift ;;
+        --dry-run) dry_run=1; shift ;;
+        -h|--help) usage 0 ;;
+        *) die "unknown argument: $1 (try --help)" ;;
+    esac
+done
+
+need_cmd python3
+need_cmd openssl
+load_config
+[ "$dry_run" = 1 ] || require_keys
+
+target="$(metadata_path)"
+
+# --- timestamp --------------------------------------------------------------
+#
+# The client stores the timestamp of the metadata it has and refuses anything
+# older, so the value must never move backwards. A machine whose clock has
+# slipped would otherwise publish a document every client ignores.
+
+now="$(date -u +%s)"
+[ "$now" -ge "$MIN_TIMESTAMP" ] ||
+    die "the system clock reads $(date -u), which is before this repository format existed. Fix the clock."
+
+if [ -f "$target" ]; then
+    previous="$(python3 "$LIB_DIR/sjson.py" time --file "$target")" ||
+        die "could not read the timestamp of the currently published $target"
+    if [ "$now" -le "$previous" ]; then
+        warn "the published metadata is timestamped $previous but the clock reads $now."
+        warn "Using $((previous + 1)) so that clients do not treat this as a downgrade."
+        now=$((previous + 1))
+    fi
+fi
+
+# --- build ------------------------------------------------------------------
+
+document="$(tmpfile metadata.json)"
+python3 "$LIB_DIR/metadata.py" \
+    --apps-dir "$APPS_DIR" \
+    --time "$now" \
+    --www "$APPSTORE_WWW" \
+    --output "$document" ||
+    die "metadata was not built; nothing has been published"
+
+if [ "$dry_run" = 1 ]; then
+    info "dry run: metadata builds and every referenced artifact is present"
+    detail "would write $target with time=$now"
+    exit 0
+fi
+
+# --- sign -------------------------------------------------------------------
+#
+# Container layout, sliced blindly by the client: the document, a newline, 100
+# characters of base64 signature, a newline.
+
+signature="$(sign_file "$document")"
+
+staged="$(tmpfile metadata.sjson)"
+cat -- "$document" > "$staged"
+printf '\n%s\n' "$signature" >> "$staged"
+
+# Verify what was just produced before it replaces the live document: an
+# unverifiable metadata file takes every client offline until it is fixed.
+pubkey_pem="$(tmpfile pub.pem)"
+write_pubkey_pem "$pubkey_pem"
+check_json="$(tmpfile check.json)"
+check_sig_b64="$(tmpfile check.sig.b64)"
+check_sig="$(tmpfile check.sig)"
+python3 "$LIB_DIR/sjson.py" split --file "$staged" \
+    --json-out "$check_json" --sig-out "$check_sig_b64" ||
+    die "the signed document did not come out in the expected layout"
+cmp -s "$document" "$check_json" ||
+    die "the signed document does not round-trip; refusing to publish"
+base64 -d < "$check_sig_b64" | tail -c 64 > "$check_sig"
+openssl pkeyutl -verify -rawin -pubin -inkey "$pubkey_pem" \
+    -sigfile "$check_sig" -in "$check_json" >/dev/null 2>&1 ||
+    die "the signature does not verify against $PUBLIC_KEY_FILE; refusing to publish"
+
+# The staged file must land on the same filesystem for the rename to be atomic.
+final="$APPSTORE_WWW/.$(metadata_filename).tmp"
+cp -- "$staged" "$final"
+install_atomically "$final" "$target"
+
+info "published $(metadata_filename) (time=$now, $(stat -c%s "$target") bytes)"
+detail "  $target"
+detail "  url: $APPSTORE_BASE_URL/$(metadata_filename)"
+
+# --- prune ------------------------------------------------------------------
+
+if [ "$prune" = 1 ]; then
+    orphans="$(tmpfile orphans)"
+    python3 "$LIB_DIR/sjson.py" orphans --file "$target" --www "$APPSTORE_WWW" > "$orphans"
+    count=0
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        # Only ever delete a plain file inside the served packages tree.
+        case "$path" in
+            "$APPSTORE_WWW"/packages/*) ;;
+            *) warn "refusing to prune outside the web root: $path"; continue ;;
+        esac
+        [ -f "$path" ] || continue
+        [ -L "$path" ] && { warn "refusing to prune a symlink: $path"; continue; }
+        rm -f -- "$path"
+        detail "  pruned ${path#"$APPSTORE_WWW"/}"
+        count=$((count + 1))
+    done < "$orphans"
+    find "$APPSTORE_WWW/packages" -mindepth 1 -type d -empty -delete
+    info "pruned $count unreferenced file(s)"
+fi

@@ -1,0 +1,39 @@
+name: Build client
+
+on: [pull_request, push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: 'temurin'
+          java-version: 21
+          cache: gradle
+
+      # The build refuses to fall back to a placeholder repository, so CI has to
+      # supply a throwaway one. This config can only ever talk to a domain that
+      # cannot resolve, and its key exists for the length of this job.
+      - name: Generate throwaway repository config
+        run: |
+          set -eu
+          openssl genpkey -algorithm ed25519 -out ci-key.pem
+          pub=$( { printf 'Ed'; openssl rand 8; \
+                   openssl pkey -in ci-key.pem -pubout -outform DER | tail -c 32; } | base64 -w0 )
+          rm -f ci-key.pem
+          cat > client/repo.properties <<EOF
+          REPO_BASE_URL=https://apps.invalid
+          REPO_PUBLIC_KEY=$pub
+          REPO_KEY_VERSION=0
+          REPO_ACCESS_KEY_HEADER=X-AppStore-Key
+          REPO_ACCESS_KEY=ci-build-only
+          EOF
+
+      - name: Build with Gradle
+        working-directory: client
+        run: ./gradlew build --no-daemon

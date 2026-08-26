@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+# Remove a package, or one version of one package, from the repository.
+#
+# Only the source fragments are touched. The artifacts stay in the web root
+# until `appstore-publish --prune` removes them, so the currently published
+# metadata never points at a file that has already been deleted.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+usage: appstore-rm <package> [versionCode] [--yes]
+
+  With a versionCode, removes that one version.
+  Without one, removes the package and all of its versions.
+EOF
+    exit "${1:-1}"
+}
+
+package=""
+version_code=""
+assume_yes=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --yes|-y) assume_yes=1; shift ;;
+        -h|--help) usage 0 ;;
+        -*) die "unknown option: $1" ;;
+        *)
+            if [ -z "$package" ]; then package="$1"
+            elif [ -z "$version_code" ]; then version_code="$1"
+            else die "too many arguments"
+            fi
+            shift ;;
+    esac
+done
+
+[ -n "$package" ] || usage
+load_config
+
+is_package_name "$package" || die "implausible package name: $package"
+package_dir="$APPS_DIR/$package"
+[ -d "$package_dir" ] || die "$package is not in this repository"
+
+if [ -n "$version_code" ]; then
+    is_version_code "$version_code" || die "versionCode must be a number"
+    variant="$package_dir/variants/$version_code.json"
+    [ -f "$variant" ] || die "$package has no versionCode $version_code"
+    if [ "$assume_yes" = 0 ]; then
+        confirm "Remove $package versionCode $version_code?" || die "cancelled"
+    fi
+    rm -f -- "$variant"
+    info "removed $package versionCode $version_code"
+else
+    if [ "$assume_yes" = 0 ]; then
+        confirm "Remove $package and all of its versions?" || die "cancelled"
+    fi
+    rm -rf -- "$package_dir"
+    info "removed $package"
+fi
+
+info ""
+info "Run 'appstore-publish --prune' to update the signed metadata and delete the artifacts."

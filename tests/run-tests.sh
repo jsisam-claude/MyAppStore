@@ -1,0 +1,312 @@
+#!/bin/bash
+#
+# End-to-end test for the repository scripts.
+#
+# Builds a throwaway repository in a temporary directory, publishes real APKs
+# into it, and checks the result the way the Android client would: slice the
+# last 102 bytes off the signed metadata, verify the Ed25519 signature against
+# the public key, then decompress and re-hash every artifact.
+#
+# Needs only bash, openssl, python3 and coreutils. No Android SDK: the fixture
+# APKs are committed.
+#
+# shellcheck disable=SC2016  # `bash -c` payloads are single-quoted deliberately:
+# their $1/$2 refer to the inner shell's arguments, not to this script's.
+
+set -uo pipefail
+
+ROOT="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)"
+BIN="$ROOT/scripts"
+FIXTURES="$ROOT/tests/fixtures"
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/appstore-tests.XXXXXX")"
+trap 'rm -rf -- "$WORK"' EXIT
+
+export APPSTORE_HOME="$WORK/state"
+WWW="$WORK/www"
+URL="https://apps.test.invalid"
+
+passed=0
+failed=0
+
+ok()   { passed=$((passed + 1)); printf '  ok    %s\n' "$1"; }
+bad()  { failed=$((failed + 1)); printf '  FAIL  %s\n' "$1"; }
+
+check() { # description command...
+    local description="$1"; shift
+    if "$@" >/dev/null 2>&1; then ok "$description"; else bad "$description"; fi
+}
+
+check_fails() { # description command...
+    local description="$1"; shift
+    if "$@" >/dev/null 2>&1; then bad "$description (command unexpectedly succeeded)"; else ok "$description"; fi
+}
+
+check_eq() { # description expected actual
+    if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected '$2', got '$3'"; fi
+}
+
+section() { printf '\n%s\n' "$1"; }
+
+# ---------------------------------------------------------------------------
+section "init"
+
+check "appstore-init succeeds" \
+    "$BIN/appstore-init" --url "$URL" --www "$WWW" --no-passphrase
+
+check "config was written" test -f "$APPSTORE_HOME/config"
+check "secret key was written" test -f "$APPSTORE_HOME/keys/repo.sec.pem"
+check "public key was written" test -f "$APPSTORE_HOME/keys/repo.pub"
+check_eq "keys directory is 0700" "700" "$(stat -c%a "$APPSTORE_HOME/keys")"
+check_eq "secret key is 0600" "600" "$(stat -c%a "$APPSTORE_HOME/keys/repo.sec.pem")"
+
+pubkey="$(cat "$APPSTORE_HOME/keys/repo.pub")"
+check_eq "public key is 56 base64 characters" "56" "${#pubkey}"
+check_eq "public key decodes to 42 bytes" "42" "$(printf '%s' "$pubkey" | base64 -d | wc -c)"
+check_eq "public key is tagged Ed" "Ed" "$(printf '%s' "$pubkey" | base64 -d | head -c 2)"
+
+check "re-initialising is refused" \
+    bash -c '! "$0" --url "$1" --www "$2" --no-passphrase' "$BIN/appstore-init" "$URL" "$WWW"
+
+# ---------------------------------------------------------------------------
+section "add"
+
+check "add base plus split with an icon" \
+    "$BIN/appstore-add" --label "Fixture App" --description "A test package" \
+        --icon "$FIXTURES/icon.png" \
+        "$FIXTURES/v42/base.apk" "$FIXTURES/v42/split_config.hdpi.apk"
+
+check "package fragment exists" test -f "$APPSTORE_HOME/apps/com.example.fixture/package.json"
+check "variant fragment exists" test -f "$APPSTORE_HOME/apps/com.example.fixture/variants/42.json"
+check "base artifact is served" test -f "$WWW/packages/com.example.fixture/42/base.apk.gz"
+check "split artifact is served" test -f "$WWW/packages/com.example.fixture/42/split_config.hdpi.apk.gz"
+check "v4 signature is served" test -f "$WWW/packages/com.example.fixture/42/base.apk.idsig"
+check "icon is served" test -f "$WWW/packages/com.example.fixture/icon.png"
+
+recorded="$(python3 "$BIN/lib/fragment.py" get \
+    --file "$APPSTORE_HOME/apps/com.example.fixture/package.json" --key signatures)"
+check_eq "recorded signer matches the fixture" \
+    "2d6f2139268c154c7f80c015c4616db3aee0f8f54f295f27f43a03ef65577539" "$recorded"
+
+check_eq "split is named the way the client parses splits" "1" \
+    "$(python3 "$BIN/lib/fragment.py" get \
+        --file "$APPSTORE_HOME/apps/com.example.fixture/variants/42.json" --key apks |
+       grep -c '^split_config\.hdpi\.apk$')"
+
+check_fails "adding the same version again is refused" \
+    "$BIN/appstore-add" --label "Fixture App" "$FIXTURES/v42/base.apk"
+
+check "--replace allows overwriting" \
+    "$BIN/appstore-add" --label "Fixture App" --replace \
+        "$FIXTURES/v42/base.apk" "$FIXTURES/v42/split_config.hdpi.apk"
+
+check_fails "a version signed by a different key is refused" \
+    "$BIN/appstore-add" --label "Fixture App" "$FIXTURES/other-signer/base.apk"
+
+check_fails "--expect-cert mismatch is refused" \
+    "$BIN/appstore-add" --label "Fixture App" \
+        --expect-cert 0000000000000000000000000000000000000000000000000000000000000000 \
+        "$FIXTURES/v43/base.apk"
+
+check "add a second version" \
+    "$BIN/appstore-add" --label "Fixture App" --channel beta \
+        --release-notes "Second test version" "$FIXTURES/v43/base.apk"
+
+# ---------------------------------------------------------------------------
+section "publish"
+
+check "dry run succeeds" "$BIN/appstore-publish" --dry-run
+check "nothing is published by a dry run" test ! -f "$WWW/metadata.1.0.sjson"
+
+check "publish succeeds" "$BIN/appstore-publish"
+check "metadata was installed" test -f "$WWW/metadata.1.0.sjson"
+
+metadata="$WWW/metadata.1.0.sjson"
+total="$(stat -c%s "$metadata")"
+
+# The client slices blindly: bytes [0, size-102) are the signed document, then a
+# newline, then 100 base64 characters, then a newline.
+head -c "$((total - 102))" "$metadata" > "$WORK/doc.json"
+tail -c 102 "$metadata" > "$WORK/trailer"
+check_eq "byte at size-102 is a newline" "1" "$(head -c 1 "$WORK/trailer" | od -An -c | tr -d ' \n' | grep -c '\\n')"
+check_eq "last byte is a newline" "1" "$(tail -c 1 "$metadata" | od -An -c | tr -d ' \n' | grep -c '\\n')"
+
+tail -c 101 "$metadata" > "$WORK/sig101"
+head -c 100 "$WORK/sig101" > "$WORK/sig.b64"
+check_eq "signature is 100 base64 characters" "100" "$(wc -c < "$WORK/sig.b64")"
+base64 -d < "$WORK/sig.b64" > "$WORK/sig.blob"
+check_eq "signature blob is 74 bytes" "74" "$(stat -c%s "$WORK/sig.blob")"
+check_eq "signature blob is tagged Ed" "Ed" "$(head -c 2 "$WORK/sig.blob")"
+
+# Key ids must match, exactly as the client's FileVerifier checks.
+tail -c +3 "$WORK/sig.blob" > "$WORK/s.rest"; head -c 8 "$WORK/s.rest" > "$WORK/s.keyid"
+printf '%s' "$pubkey" | base64 -d | tail -c +3 > "$WORK/p.rest"; head -c 8 "$WORK/p.rest" > "$WORK/p.keyid"
+check "signature key id matches the public key" cmp -s "$WORK/s.keyid" "$WORK/p.keyid"
+
+# Verify the signature the way the client does, from the public key alone.
+printf '%s' "$pubkey" | base64 -d | tail -c 32 > "$WORK/pub.raw"
+{ printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00'; cat "$WORK/pub.raw"; } > "$WORK/pub.der"
+{ echo "-----BEGIN PUBLIC KEY-----"; base64 -w64 < "$WORK/pub.der"; echo "-----END PUBLIC KEY-----"; } > "$WORK/pub.pem"
+tail -c 64 "$WORK/sig.blob" > "$WORK/sig.raw"
+check "Ed25519 signature verifies over the sliced document" \
+    openssl pkeyutl -verify -rawin -pubin -inkey "$WORK/pub.pem" \
+        -sigfile "$WORK/sig.raw" -in "$WORK/doc.json"
+
+check "a tampered document fails verification" bash -c '
+    cp "$1/doc.json" "$1/tampered.json"
+    printf "x" >> "$1/tampered.json"
+    ! openssl pkeyutl -verify -rawin -pubin -inkey "$1/pub.pem" \
+        -sigfile "$1/sig.raw" -in "$1/tampered.json" >/dev/null 2>&1
+' _ "$WORK"
+
+check "document is valid JSON" python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$WORK/doc.json"
+timestamp="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['time'])" "$WORK/doc.json")"
+check "timestamp is at or above the client's MIN_TIMESTAMP" test "$timestamp" -ge 1770000000
+
+check_eq "both versions are present" "2" \
+    "$(python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+print(len(d['packages']['com.example.fixture']['variants']))
+" "$WORK/doc.json")"
+
+check_eq "label survives into the metadata" "Fixture App" \
+    "$(python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+print(d['packages']['com.example.fixture']['variants']['42']['label'])
+" "$WORK/doc.json")"
+
+check_eq "the four apk arrays are the same length" "ok" \
+    "$(python3 -c "
+import json,sys
+v = json.load(open(sys.argv[1]))['packages']['com.example.fixture']['variants']['42']
+n = len(v['apks'])
+print('ok' if all(len(v[k]) == n for k in ('apkHashes','apkSizes','apkGzSizes')) else 'mismatch')
+" "$WORK/doc.json")"
+
+# ---------------------------------------------------------------------------
+section "verify"
+
+check "appstore-verify passes on a freshly published repository" "$BIN/appstore-verify"
+
+check_fails "verify catches a corrupted artifact" bash -c '
+    target="$1/packages/com.example.fixture/42/base.apk.gz"
+    cp "$target" "$2/backup.gz"
+    printf "corrupt" >> "$target"
+    "$3/appstore-verify" >/dev/null 2>&1
+    status=$?
+    cp "$2/backup.gz" "$target"
+    exit $status
+' _ "$WWW" "$WORK" "$BIN"
+
+check "verify passes again once the artifact is restored" "$BIN/appstore-verify"
+
+# ---------------------------------------------------------------------------
+section "timestamp monotonicity"
+
+before="$(python3 "$BIN/lib/sjson.py" time --file "$metadata")"
+python3 - "$metadata" <<'PY'
+# Rewrite the published document with a far-future timestamp, keeping the
+# container layout, to simulate a clock that has since gone backwards.
+import json, sys
+path = sys.argv[1]
+raw = open(path, "rb").read()
+doc = json.loads(raw[:-102].decode("utf-8"))
+doc["time"] = doc["time"] + 100000
+payload = json.dumps(doc, separators=(",", ":"), sort_keys=True).encode("utf-8")
+open(path, "wb").write(payload + raw[-102:])
+PY
+"$BIN/appstore-publish" >/dev/null 2>&1
+after="$(python3 "$BIN/lib/sjson.py" time --file "$metadata")"
+check "republishing never moves the timestamp backwards" test "$after" -gt "$((before + 100000))"
+check "the republished metadata still verifies" "$BIN/appstore-verify"
+
+# ---------------------------------------------------------------------------
+section "access keys"
+
+keys_conf="$APPSTORE_HOME/access-keys.conf"
+check "nginx map file was generated" test -f "$keys_conf"
+check "map denies by default" grep -q 'default 0;' "$keys_conf"
+check "map is keyed on the configured header" grep -q 'map \$http_x_appstore_key' "$keys_conf"
+
+first_key="$(cut -f1 < "$APPSTORE_HOME/keys/access-keys" | head -n1)"
+check_eq "the default key is 64 hex characters" "64" "${#first_key}"
+check "the default key is in the map" grep -q "\"$first_key\" 1;" "$keys_conf"
+
+check "a second key can be added" "$BIN/appstore-key" add --label rollout
+check_eq "both keys are now accepted" "2" "$(grep -c '" 1;' "$keys_conf")"
+check "revoking by label works" "$BIN/appstore-key" revoke rollout
+check_eq "one key remains" "1" "$(grep -c '" 1;' "$keys_conf")"
+check_fails "revoking an unknown label fails" "$BIN/appstore-key" revoke nope
+
+# ---------------------------------------------------------------------------
+section "client config"
+
+config="$("$BIN/appstore-client-config")"
+check "client config carries the base URL" bash -c 'printf "%s" "$1" | grep -q "^REPO_BASE_URL=https://apps.test.invalid$"' _ "$config"
+check "client config carries the public key" bash -c 'printf "%s" "$1" | grep -q "^REPO_PUBLIC_KEY=$2$"' _ "$config" "$pubkey"
+check "client config carries an access key" bash -c 'printf "%s" "$1" | grep -qE "^REPO_ACCESS_KEY=[0-9a-f]{64}$"' _ "$config"
+check "client config carries the header name" bash -c 'printf "%s" "$1" | grep -q "^REPO_ACCESS_KEY_HEADER=X-AppStore-Key$"' _ "$config"
+
+# ---------------------------------------------------------------------------
+section "nginx configuration"
+
+site="$("$BIN/appstore-nginx")"
+check "site config includes the access key map" bash -c 'printf "%s" "$1" | grep -q "include .*access-keys.conf;"' _ "$site"
+check "site config rejects requests without a key" bash -c 'printf "%s" "$1" | grep -q "return 401;"' _ "$site"
+check "site config disables gzip for artifacts" bash -c 'printf "%s" "$1" | grep -q "gzip off;"' _ "$site"
+check "site config serves the right metadata filename" bash -c 'printf "%s" "$1" | grep -q "location = /metadata.1.0.sjson"' _ "$site"
+check "site config refuses everything else" bash -c 'printf "%s" "$1" | grep -q "return 404;"' _ "$site"
+check "site config allows only GET and HEAD" bash -c 'printf "%s" "$1" | grep -q "limit_except GET HEAD"' _ "$site"
+if command -v nginx >/dev/null 2>&1; then
+    check "nginx accepts the generated configuration" bash -c '
+        printf "%s" "$1" > "$2/site.conf"
+        nginx -t -c /dev/stdin <<NGINX >/dev/null 2>&1
+events {}
+http { include "$2/site.conf"; }
+NGINX
+    ' _ "$site" "$WORK"
+fi
+
+# ---------------------------------------------------------------------------
+section "remove and prune"
+
+check "removing one version succeeds" "$BIN/appstore-rm" com.example.fixture 43 --yes
+check "artifact still present before pruning" test -f "$WWW/packages/com.example.fixture/43/base.apk.gz"
+check "publish with prune succeeds" "$BIN/appstore-publish" --prune
+check "pruned artifact is gone" test ! -f "$WWW/packages/com.example.fixture/43/base.apk.gz"
+check "remaining version is untouched" test -f "$WWW/packages/com.example.fixture/42/base.apk.gz"
+check "repository still verifies after pruning" "$BIN/appstore-verify"
+
+check "removing the whole package succeeds" "$BIN/appstore-rm" com.example.fixture --yes
+check "publish with prune succeeds on an empty repository" "$BIN/appstore-publish" --prune
+check_eq "no packages remain in the metadata" "0" \
+    "$(python3 -c "
+import json,sys
+raw = open(sys.argv[1],'rb').read()
+print(len(json.loads(raw[:-102].decode('utf-8'))['packages']))
+" "$metadata")"
+
+# ---------------------------------------------------------------------------
+section "passphrase-protected signing key"
+
+export APPSTORE_HOME="$WORK/state2"
+WWW2="$WORK/www2"
+export APPSTORE_KEY_PASSPHRASE="a test passphrase"
+
+check "init with a passphrase succeeds" \
+    "$BIN/appstore-init" --url "$URL" --www "$WWW2"
+check "the key is encrypted on disk" \
+    grep -q "ENCRYPTED PRIVATE KEY" "$APPSTORE_HOME/keys/repo.sec.pem"
+check "add works against the second repository" \
+    "$BIN/appstore-add" --label "Fixture App" "$FIXTURES/v42/base.apk"
+check "publish works with the passphrase from the environment" "$BIN/appstore-publish"
+check "the result verifies" "$BIN/appstore-verify"
+
+check_fails "publishing with the wrong passphrase fails" \
+    env APPSTORE_KEY_PASSPHRASE=wrong "$BIN/appstore-publish"
+
+# ---------------------------------------------------------------------------
+printf '\n%d passed, %d failed\n' "$passed" "$failed"
+[ "$failed" -eq 0 ]

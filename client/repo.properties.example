@@ -1,0 +1,22 @@
+# Repository configuration baked into the app at build time.
+#
+# Copy to repo.properties and fill in. `appstore-client-config` on the
+# repository host prints this file with the correct values already filled in.
+#
+# repo.properties is gitignored: REPO_ACCESS_KEY is a shared credential and
+# must not be committed.
+
+# Base URL of your repository. Must be https:// and must not end with '/'.
+REPO_BASE_URL=https://apps.example.com
+
+# Repository signing public key, base64 signify format, 56 characters.
+# Printed by appstore-init; also stored at $APPSTORE_HOME/keys/repo.pub.
+REPO_PUBLIC_KEY=
+
+# Bumped only when the signing key is replaced. Part of the metadata filename.
+REPO_KEY_VERSION=0
+
+# Phase 1 access control. Leave REPO_ACCESS_KEY empty to serve the repository
+# without a gate. See docs/security.md for what this key does and does not do.
+REPO_ACCESS_KEY_HEADER=X-AppStore-Key
+REPO_ACCESS_KEY=

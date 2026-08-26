@@ -1,0 +1,132 @@
+#!/bin/bash
+#
+# Independently check the published repository.
+#
+# Nothing here trusts the publishing path: the signature is verified with
+# openssl against the public key file, and every artifact is decompressed and
+# re-hashed against the signed document, the same way a device would.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+usage: appstore-verify [--remote]
+
+  --remote   also fetch the metadata over HTTPS with an access key and check
+             that the bytes served match the bytes on disk
+EOF
+    exit "${1:-1}"
+}
+
+remote=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --remote) remote=1; shift ;;
+        -h|--help) usage 0 ;;
+        *) die "unknown argument: $1 (try --help)" ;;
+    esac
+done
+
+need_cmd python3
+need_cmd openssl
+load_config
+[ -f "$PUBLIC_KEY_FILE" ] || die "public key not found at $PUBLIC_KEY_FILE"
+
+target="$(metadata_path)"
+[ -f "$target" ] || die "$target does not exist. Run appstore-publish."
+
+failures=0
+fail() { printf '%serror:%s %s\n' "$_c_red" "$_c_off" "$*" >&2; failures=$((failures + 1)); }
+
+# --- signature --------------------------------------------------------------
+
+json="$(tmpfile doc.json)"
+sig_b64="$(tmpfile sig.b64)"
+python3 "$LIB_DIR/sjson.py" split --file "$target" --json-out "$json" --sig-out "$sig_b64" ||
+    die "$target is not in the expected container layout"
+
+sig_blob="$(tmpfile sig.blob)"
+base64 -d < "$sig_b64" > "$sig_blob"
+[ "$(stat -c%s "$sig_blob")" = 74 ] ||
+    fail "signature blob is $(stat -c%s "$sig_blob") bytes, expected 74"
+
+pub_blob="$(tmpfile pub.blob)"
+base64 -d < "$PUBLIC_KEY_FILE" > "$pub_blob"
+[ "$(stat -c%s "$pub_blob")" = 42 ] ||
+    die "$PUBLIC_KEY_FILE does not decode to a 42 byte signify key"
+
+# Algorithm tag and key id, the same two checks the client's FileVerifier makes
+# before it looks at the signature itself.
+[ "$(head -c 2 "$sig_blob")" = "Ed" ] || fail "signature is not tagged as Ed25519"
+sig_keyid="$(tmpfile sig.keyid)"
+pub_keyid="$(tmpfile pub.keyid)"
+tail -c +3 "$sig_blob" > "$sig_keyid.all"; head -c 8 "$sig_keyid.all" > "$sig_keyid"
+tail -c +3 "$pub_blob" > "$pub_keyid.all"; head -c 8 "$pub_keyid.all" > "$pub_keyid"
+cmp -s "$sig_keyid" "$pub_keyid" ||
+    fail "the signature's key id does not match $PUBLIC_KEY_FILE (signed with a different key?)"
+
+pubkey_pem="$(tmpfile pub.pem)"
+write_pubkey_pem "$pubkey_pem"
+raw_sig="$(tmpfile sig.raw)"
+tail -c 64 "$sig_blob" > "$raw_sig"
+if openssl pkeyutl -verify -rawin -pubin -inkey "$pubkey_pem" \
+        -sigfile "$raw_sig" -in "$json" >/dev/null 2>&1; then
+    info "signature: OK (Ed25519, key $(cat "$PUBLIC_KEY_FILE"))"
+else
+    fail "signature does NOT verify against $PUBLIC_KEY_FILE"
+fi
+
+# --- contents ---------------------------------------------------------------
+
+if python3 "$LIB_DIR/sjson.py" verify --file "$target" --www "$APPSTORE_WWW"; then
+    info "artifacts: OK"
+else
+    fail "one or more artifacts do not match the signed metadata"
+fi
+
+# --- as served --------------------------------------------------------------
+
+if [ "$remote" = 1 ]; then
+    need_cmd curl
+    url="$APPSTORE_BASE_URL/$(metadata_filename)"
+    args=(--silent --show-error --fail --location-trusted --max-time 60)
+    if [ "$APPSTORE_ACCESS_KEY_REQUIRED" = 1 ]; then
+        key=""
+        if [ -f "$ACCESS_KEYS_FILE" ]; then
+            key="$(cut -f1 < "$ACCESS_KEYS_FILE" | grep -m1 . || true)"
+        fi
+        [ -n "$key" ] || die "no access key available to test with"
+        args+=(--header "$APPSTORE_AUTH_HEADER: $key")
+    fi
+
+    fetched="$(tmpfile fetched)"
+    if curl "${args[@]}" -o "$fetched" "$url"; then
+        if cmp -s "$fetched" "$target"; then
+            info "remote: OK ($url serves the same bytes)"
+        else
+            fail "$url served $(stat -c%s "$fetched") bytes, on disk it is $(stat -c%s "$target")"
+        fi
+    else
+        fail "could not fetch $url"
+    fi
+
+    if [ "$APPSTORE_ACCESS_KEY_REQUIRED" = 1 ]; then
+        code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                --max-time 30 "$url" || echo 000)"
+        if [ "$code" = "200" ]; then
+            fail "$url returned 200 with no access key: the gate is not being enforced"
+        else
+            info "access gate: OK (no key gets HTTP $code)"
+        fi
+    fi
+fi
+
+info ""
+if [ "$failures" -eq 0 ]; then
+    info "repository verified"
+else
+    die "$failures check(s) failed"
+fi
