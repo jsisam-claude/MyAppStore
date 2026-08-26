@@ -1,0 +1,46 @@
+// MyAppStore, bundled into the OS image as a prebuilt privileged app.
+//
+// Drop the release APK at prebuilt/MyAppStore.apk (rom/import-prebuilt.sh
+// checks it first), then add rom/myappstore.mk to the product.
+//
+// The APK is presigned: it is signed with your own release key, not the
+// platform key, and that key must stay the same forever. The store updates
+// itself over the network like any other package, and Android refuses an update
+// signed by a different key than the installed one.
+
+android_app_import {
+    name: "MyAppStore",
+    apk: "prebuilt/MyAppStore.apk",
+    presigned: true,
+
+    // Privileged, so that INSTALL_PACKAGES can be granted and the store can
+    // install and update packages without a per-install user prompt.
+    privileged: true,
+
+    // /product rather than /system, the partition AOSP reserves for exactly
+    // this kind of product customisation. The allowlist below must live on the
+    // same partition as the app, which is why it is also product_specific.
+    product_specific: true,
+
+    required: ["privapp-permissions-myappstore"],
+
+    // Prebuilt release APKs ship with compressed dex, which dexpreopt does not
+    // accept. The store is small and self-updates into /data anyway, where the
+    // preopted copy would stop being used. Turn this on only if you also build
+    // the APK with uncompressed dex.
+    dex_preopt: {
+        enabled: false,
+    },
+}
+
+prebuilt_etc {
+    name: "privapp-permissions-myappstore",
+    src: "privapp-permissions-myappstore.xml",
+    sub_dir: "permissions",
+    product_specific: true,
+
+    // The filename must end in .xml: SystemConfig only reads *.xml out of the
+    // permissions directory, and a privileged app whose permissions are not
+    // allowlisted stops the device from booting.
+    filename: "privapp-permissions-myappstore.xml",
+}

@@ -26,6 +26,8 @@ EOF
     exit "${1:-1}"
 }
 
+case "${1:-}" in -h|--help) usage 0 ;; esac
+
 load_config
 
 # Reads the key file into two parallel arrays.

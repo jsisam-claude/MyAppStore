@@ -260,13 +260,37 @@ check "site config serves the right metadata filename" bash -c 'printf "%s" "$1"
 check "site config refuses everything else" bash -c 'printf "%s" "$1" | grep -q "return 404;"' _ "$site"
 check "site config allows only GET and HEAD" bash -c 'printf "%s" "$1" | grep -q "limit_except GET HEAD"' _ "$site"
 if command -v nginx >/dev/null 2>&1; then
-    check "nginx accepts the generated configuration" bash -c '
-        printf "%s" "$1" > "$2/site.conf"
-        nginx -t -c /dev/stdin <<NGINX >/dev/null 2>&1
-events {}
-http { include "$2/site.conf"; }
+    # nginx -t opens the listening sockets, so the check needs unprivileged
+    # ports, real certificate files, and temp paths it is allowed to write.
+    ngx="$WORK/nginx"
+    mkdir -p "$ngx/tmp" "$ngx/certs"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -keyout "$ngx/certs/privkey.pem" -out "$ngx/certs/fullchain.pem" \
+        -subj "/CN=apps.test.invalid" >/dev/null 2>&1
+    "$BIN/appstore-nginx" --cert-dir "$ngx/certs" > "$ngx/site.conf"
+    # Unprivileged ports, and no IPv6: CI runners do not always have it.
+    sed -i 's/listen 80;/listen 18080;/; s/listen 443 ssl/listen 18443 ssl/; /listen \[::\]/d' \
+        "$ngx/site.conf"
+    cat > "$ngx/nginx.conf" <<NGINX
+worker_processes 1;
+error_log $ngx/error.log warn;
+pid $ngx/nginx.pid;
+events { worker_connections 64; }
+http {
+    access_log $ngx/access.log;
+    client_body_temp_path $ngx/tmp/cb;
+    proxy_temp_path $ngx/tmp/p;
+    fastcgi_temp_path $ngx/tmp/f;
+    uwsgi_temp_path $ngx/tmp/u;
+    scgi_temp_path $ngx/tmp/s;
+    include $ngx/site.conf;
+}
 NGINX
-    ' _ "$site" "$WORK"
+    if nginx -t -c "$ngx/nginx.conf" >"$ngx/test.log" 2>&1; then
+        ok "nginx accepts the generated configuration"
+    else
+        bad "nginx rejected the generated configuration: $(tail -n2 "$ngx/test.log" | tr '\n' ' ')"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

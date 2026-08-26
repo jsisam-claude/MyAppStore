@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Privileged permission allowlist for MyAppStore.
+
+    GrapheneOS builds with ro.control_privapp_permissions=enforce, which means a
+    privileged app that requests a signature|privileged permission not listed
+    here stops the device from booting. It also means the reverse: only what is
+    listed here is granted.
+
+    Of everything the app's manifest declares, INSTALL_PACKAGES is the only
+    permission with protectionLevel="signature|privileged" and so the only one
+    that needs an entry. The others are normal or appop permissions:
+
+      ENFORCE_UPDATE_OWNERSHIP              normal
+      UPDATE_PACKAGES_WITHOUT_USER_ACTION   normal
+      QUERY_ALL_PACKAGES                    normal
+      REQUEST_DELETE_PACKAGES               normal
+      RECEIVE_BOOT_COMPLETED                normal
+      FOREGROUND_SERVICE                    normal|instant
+      FOREGROUND_SERVICE_SPECIAL_USE        normal|appop|instant
+      ACCESS_NETWORK_STATE                  normal|instant
+      INTERNET, POST_NOTIFICATIONS          dangerous
+      REQUEST_INSTALL_PACKAGES              signature|appop
+
+    The package name must match applicationId in client/app/build.gradle.kts.
+-->
+<permissions>
+    <privapp-permissions package="app.myappstore">
+        <allow-permission name="android.permission.INSTALL_PACKAGES"/>
+    </privapp-permissions>
+</permissions>

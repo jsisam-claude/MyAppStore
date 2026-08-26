@@ -23,7 +23,7 @@ object RepoAuth {
     val isEnabled = KEY.isNotEmpty()
 
     /** Attaches the key if [url] points at the configured repository. */
-    fun apply(connection: HttpURLConnection, url: String) {
+    fun attach(connection: HttpURLConnection, url: String) {
         if (isEnabled && isRepoUrl(url)) {
             connection.setRequestProperty(HEADER_NAME, KEY)
         }

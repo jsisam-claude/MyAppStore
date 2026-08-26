@@ -7,6 +7,22 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && p
 # shellcheck source=lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"
 
+usage() {
+    cat >&2 <<EOF
+usage: appstore-list
+
+Lists the packages and versions this repository holds, and when it was last
+published. Set APPSTORE_HOME to select a repository.
+EOF
+    exit "${1:-1}"
+}
+
+case "${1:-}" in
+    "") ;;
+    -h|--help) usage 0 ;;
+    *) die "unknown argument: $1 (try --help)" ;;
+esac
+
 load_config
 
 if [ ! -d "$APPS_DIR" ] || [ -z "$(ls -A "$APPS_DIR" 2>/dev/null)" ]; then

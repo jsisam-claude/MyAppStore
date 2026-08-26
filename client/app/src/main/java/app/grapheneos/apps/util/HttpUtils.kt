@@ -29,7 +29,7 @@ fun openConnection(network: Network?, urlString: String, configure: HttpURLConne
 
     connection.configure()
     // Applied after configure() so that a caller cannot drop it.
-    RepoAuth.apply(connection, urlString)
+    RepoAuth.attach(connection, urlString)
     connection.connect()
     return ScopedHttpConnection(connection)
 }
