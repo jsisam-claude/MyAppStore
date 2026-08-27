@@ -103,6 +103,19 @@ check "--replace allows overwriting" \
 check_fails "a version signed by a different key is refused" \
     "$BIN/appstore-add" --label "Fixture App" "$FIXTURES/other-signer/base.apk"
 
+# A malformed APK has to fail as a clear error, not a Python traceback.
+head -c 900 "$FIXTURES/v42/base.apk" > "$WORK/truncated.apk"
+check_fails "a truncated APK is refused" \
+    "$BIN/appstore-add" --label "Broken" "$WORK/truncated.apk"
+check "the truncated APK produces a clean error, not a traceback" bash -c '
+    output="$(python3 "$1/lib/apkinfo.py" "$2" 2>&1 || true)"
+    case "$output" in
+        *Traceback*) exit 1 ;;
+        error:*) exit 0 ;;
+        *) exit 1 ;;
+    esac
+' _ "$BIN" "$WORK/truncated.apk"
+
 check_fails "--expect-cert mismatch is refused" \
     "$BIN/appstore-add" --label "Fixture App" \
         --expect-cert 0000000000000000000000000000000000000000000000000000000000000000 \
@@ -247,6 +260,14 @@ check_eq "both keys are now accepted" "2" "$(grep -c '" 1;' "$keys_conf")"
 check "revoking by label works" "$BIN/appstore-key" revoke rollout
 check_eq "one key remains" "1" "$(grep -c '" 1;' "$keys_conf")"
 check_fails "revoking an unknown label fails" "$BIN/appstore-key" revoke nope
+
+# The map file is nginx configuration, so a malformed key must never reach it.
+cp "$APPSTORE_HOME/keys/access-keys" "$WORK/keys.bak"
+printf 'notahexkey"; }\tevil\t2026\n' >> "$APPSTORE_HOME/keys/access-keys"
+check_fails "a malformed key is refused rather than written into nginx config" \
+    "$BIN/appstore-key" sync
+cp "$WORK/keys.bak" "$APPSTORE_HOME/keys/access-keys"
+check "syncing works again once the key file is clean" "$BIN/appstore-key" sync
 
 # ---------------------------------------------------------------------------
 section "client config"

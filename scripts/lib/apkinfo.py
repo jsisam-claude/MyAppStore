@@ -22,6 +22,7 @@ import json
 import struct
 import sys
 import zipfile
+import zlib
 
 # ResChunk_header types.
 RES_STRING_POOL_TYPE = 0x0001
@@ -328,6 +329,17 @@ def extract_certificates(data):
 
 # --------------------------------------------------------------------------
 
+# Everything below parses a file chosen by whoever is publishing, but the file
+# itself is attacker-supplied often enough (a vendor drop, a build server) that
+# a malformed one has to produce a clear error rather than a traceback.
+# Truncation, a corrupt deflate stream and an unsupported compression method all
+# surface from zipfile as different exception types.
+PARSE_ERRORS = (
+    zipfile.BadZipFile, zlib.error, OSError, NotImplementedError, EOFError,
+    struct.error, IndexError, ValueError, UnicodeDecodeError,
+)
+
+
 def read_apk(path):
     with open(path, "rb") as handle:
         data = handle.read()
@@ -337,11 +349,18 @@ def read_apk(path):
             manifest = archive.read("AndroidManifest.xml")
     except KeyError:
         raise ApkError("no AndroidManifest.xml: not an APK")
-    except zipfile.BadZipFile as exc:
-        raise ApkError("not a valid zip archive: %s" % exc)
+    except PARSE_ERRORS as exc:
+        raise ApkError("not a readable zip archive: %s: %s"
+                       % (type(exc).__name__, exc))
 
-    info = parse_manifest(manifest)
-    scheme, certs = extract_certificates(data)
+    try:
+        info = parse_manifest(manifest)
+        scheme, certs = extract_certificates(data)
+    except ApkError:
+        raise
+    except PARSE_ERRORS as exc:
+        raise ApkError("malformed APK: %s: %s" % (type(exc).__name__, exc))
+
     info["signatureScheme"] = scheme
     info["certDigests"] = [hashlib.sha256(cert).hexdigest() for cert in certs]
     return info

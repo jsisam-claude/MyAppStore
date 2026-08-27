@@ -25,6 +25,7 @@ index.
 
 | | |
 |---|---|
+| [`docs/build.md`](docs/build.md) | **Start here.** The full build, end to end: repository, nginx, client, OS image. |
 | `client/` | The forked Android client. See [`client/UPSTREAM.md`](client/UPSTREAM.md) for exactly what was changed and how to sync upstream. |
 | `scripts/` | `appstore-*`, the repository management commands. |
 | `rom/` | Bundling the client into a GrapheneOS build as a prebuilt privileged app. See [`rom/README.md`](rom/README.md). |
@@ -42,54 +43,27 @@ do not have to pass `--label`.
 
 ## Quickstart
 
-### 1. Set up the repository
+The full walkthrough, including TLS, the client build and the OS image, is in
+**[docs/build.md](docs/build.md)**. The short version:
 
 ```sh
+# on the repository host
 sudo scripts/appstore-init --url https://apps.example.com
-```
-
-That creates `/var/lib/appstore` (state, keys) and `/var/www/appstore` (what
-nginx serves), generates the Ed25519 signing key and the first access key, and
-prints both. It prompts for a passphrase for the signing key; pass
-`--no-passphrase` for unattended publishing.
-
-### 2. Configure nginx
-
-```sh
 sudo scripts/appstore-nginx --install /etc/nginx/sites-available/appstore
 sudo ln -s /etc/nginx/sites-available/appstore /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
-```
 
-The generated config expects a certificate at
-`/etc/letsencrypt/live/<your domain>/`; use `--cert-dir` if yours is elsewhere.
-Remove the `listen [::]` lines if the host has no IPv6.
-
-### 3. Add apps
-
-```sh
 sudo scripts/appstore-add --label "Example" --icon example.png example.apk
 sudo scripts/appstore-publish
-sudo scripts/appstore-verify
-```
+sudo scripts/appstore-verify --remote
 
-Pass split APKs alongside the base APK in the same command:
-
-```sh
-sudo scripts/appstore-add --label "Example" \
-    base.apk split_config.arm64_v8a.apk split_config.en.apk
-```
-
-### 4. Build the client
-
-```sh
+# then build the client against it
 sudo scripts/appstore-client-config > client/repo.properties
 cd client && ./gradlew assembleRelease
 ```
 
 The repository URL, signing public key and access key are compiled into the
-APK. Changing any of them means a new client build. To ship it inside your
-GrapheneOS build, see [`rom/README.md`](rom/README.md).
+APK, so changing any of them means a new client build.
 
 ## Updating an app
 

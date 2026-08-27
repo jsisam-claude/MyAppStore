@@ -40,6 +40,11 @@ read_keys() {
     local key label when
     while IFS=$'\t' read -r key label when || [ -n "$key" ]; do
         case "$key" in ''|'#'*) continue ;; esac
+        # The map file is nginx configuration. Anything that is not a plain hex
+        # key could inject directives into it, so refuse rather than emit it.
+        if ! [[ "$key" =~ ^[0-9a-f]{32,128}$ ]]; then
+            die "$ACCESS_KEYS_FILE contains a malformed key. Keys must be hex; use 'appstore-key add'."
+        fi
         keys+=("$key")
         labels+=("${label:-unnamed}")
         created+=("${when:-unknown}")

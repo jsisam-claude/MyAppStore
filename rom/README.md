@@ -8,37 +8,19 @@ packages itself, so updates apply without a per-app confirmation prompt. Without
 it the app still works, but every install goes through the "install unknown
 apps" flow.
 
-## One-time setup
+## Before you start
 
-**1. Create a release keystore for the client and never lose it.**
+You need a release-signed client APK. [docs/build.md](../docs/build.md) covers
+creating the release keystore, pointing the client at your repository, and
+building it — parts 2 and 3 of that guide are this directory's prerequisites.
 
-```sh
-keytool -genkeypair -v -keystore myappstore-release.jks -alias myappstore \
-    -keyalg RSA -keysize 4096 -validity 10000
-```
+Two things from it matter most here:
 
-The store updates itself over the network, and Android refuses an update signed
-by a different key than the installed one. Losing this key means every device
-has to be reflashed to move off the old build.
-
-**2. Point the client at your repository.**
-
-On the repository host:
-
-```sh
-appstore-client-config > client/repo.properties
-```
-
-**3. Tell Gradle about the keystore** by writing `client/keystore.properties`:
-
-```properties
-storeFile=myappstore-release.jks
-storePassword=...
-keyAlias=myappstore
-keyPassword=...
-```
-
-Both files are gitignored, and both are credentials.
+- **The release signing key can never change.** The store updates itself over
+  the network, and Android refuses an update signed by a different key than the
+  installed one. Losing it means reflashing every device.
+- **Record the signing certificate digest** that `import-prebuilt.sh` prints.
+  Every later release must match it.
 
 ## Each release
 
@@ -49,7 +31,7 @@ cd .. && ./rom/import-prebuilt.sh client/app/build/outputs/apk/release/app-relea
 
 `import-prebuilt.sh` refuses an APK with the wrong package name or a debug
 signing key, verifies the signature when `apksigner` is available, and prints the
-signing certificate digest. Record that digest: it must never change.
+signing certificate digest.
 
 Then put this directory somewhere in the build tree, for example
 `vendor/myorg/myappstore/`, and add to your device or product makefile:

@@ -178,7 +178,8 @@ signature with openssl against the public key file, checks the algorithm tag and
 key id the way the client does, then decompresses and re-hashes every artifact
 against the signed index. `--remote` also fetches over HTTPS and confirms the
 served bytes match the file on disk, and that a request with no access key is
-refused.
+refused. Like the client, it does not follow redirects, so it cannot be induced
+to send the access key to another host.
 
 Run it after publishing, and after anything touches the web root.
 

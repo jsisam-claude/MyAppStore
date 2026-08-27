@@ -92,7 +92,11 @@ fi
 if [ "$remote" = 1 ]; then
     need_cmd curl
     url="$APPSTORE_BASE_URL/$(metadata_filename)"
-    args=(--silent --show-error --fail --location-trusted --max-time 60)
+    # No redirect following. The client sets instanceFollowRedirects = false for
+    # the same reason: a redirect would resend the access key to whatever host it
+    # points at, and a repository that redirects is a misconfiguration worth
+    # failing on rather than papering over.
+    args=(--silent --show-error --fail --max-redirs 0 --max-time 60)
     if [ "$APPSTORE_ACCESS_KEY_REQUIRED" = 1 ]; then
         key=""
         if [ -f "$ACCESS_KEYS_FILE" ]; then
