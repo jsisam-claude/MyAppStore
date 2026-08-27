@@ -193,6 +193,29 @@ fi
 if [ -z "$label" ] && [ -f "$variant_file" ]; then
     label="$(python3 "$LIB_DIR/fragment.py" get --file "$variant_file" --key label)" || label=""
 fi
+# Otherwise inherit the label already published for this package. An app's
+# display name rarely changes between versions, and making every update retype
+# it is how a package ends up with two spellings of its own name.
+if [ -z "$label" ]; then
+    shopt -s nullglob
+    known_variants=("$APPS_DIR/$package/variants"/*.json)
+    shopt -u nullglob
+    newest_file=""
+    newest_code=-1
+    for known in "${known_variants[@]}"; do
+        code="$(basename "$known" .json)"
+        if is_version_code "$code" && [ "$code" -gt "$newest_code" ]; then
+            newest_code="$code"
+            newest_file="$known"
+        fi
+    done
+    if [ -n "$newest_file" ]; then
+        label="$(python3 "$LIB_DIR/fragment.py" get --file "$newest_file" --key label)" || label=""
+        if [ -n "$label" ]; then
+            detail "reusing the label from versionCode $newest_code: \"$label\""
+        fi
+    fi
+fi
 [ -n "$label" ] ||
     die "could not determine a display name for $package. Pass --label, or install aapt2."
 

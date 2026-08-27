@@ -91,6 +91,47 @@ The repository URL, signing public key and access key are compiled into the
 APK. Changing any of them means a new client build. To ship it inside your
 GrapheneOS build, see [`rom/README.md`](rom/README.md).
 
+## Updating an app
+
+There is no separate update command. Publish a new version by adding it: the
+versionCode comes from the APK, so a higher one is a new version rather than a
+replacement.
+
+```sh
+sudo scripts/appstore-add --release-notes "Fixes the thing." example-1.3.apk
+sudo scripts/appstore-publish
+```
+
+The app's name, description and icon carry over from the previous version, so
+`--label` is only needed the first time. `appstore-add` also refuses an APK
+signed by a different key than the version already published — that is the
+mistake that ships an update no device can install.
+
+Devices pick it up on the auto-update job, or immediately if someone pulls to
+refresh in the app.
+
+Older versions stay in the repository until you remove them, and they are dead
+weight: the client only ever offers the highest versionCode on each release
+channel, and `appstore-publish` warns when two versions share one. To retire
+one:
+
+```sh
+sudo scripts/appstore-rm com.example.app 42
+sudo scripts/appstore-publish --prune
+```
+
+`--prune` is what deletes the artifacts, and it runs after the new index is
+signed, so the live index never points at a file that is already gone.
+
+Two related things:
+
+- **Re-uploading the same versionCode** — a bad build, say — needs `--replace`.
+  Without it `appstore-add` refuses, so you cannot quietly change what a version
+  means underneath devices that already have it.
+- **A genuinely rotated signing key** needs `--allow-signer-change`, which
+  records both certificates as valid. Devices that already have the old version
+  still cannot take the update; they need a reinstall.
+
 ## Commands
 
 | | |

@@ -112,6 +112,14 @@ check "add a second version" \
     "$BIN/appstore-add" --label "Fixture App" --channel beta \
         --release-notes "Second test version" "$FIXTURES/v43/base.apk"
 
+# Updating should not mean retyping the app's name every time.
+"$BIN/appstore-rm" com.example.fixture 43 --yes >/dev/null 2>&1
+check "a new version can be added without --label" \
+    "$BIN/appstore-add" --replace --channel beta "$FIXTURES/v43/base.apk"
+check_eq "it inherits the label from the previous version" "Fixture App" \
+    "$(python3 "$BIN/lib/fragment.py" get \
+        --file "$APPSTORE_HOME/apps/com.example.fixture/variants/43.json" --key label)"
+
 # ---------------------------------------------------------------------------
 section "publish"
 
