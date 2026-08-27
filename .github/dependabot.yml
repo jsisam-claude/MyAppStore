@@ -1,12 +1,18 @@
+# Dependabot deliberately does NOT watch client/ Gradle dependencies.
+#
+# client/ is a thin fork of GrapheneOS/Apps (see client/UPSTREAM.md). Its
+# dependency versions are upstream's, and they arrive here by merging upstream.
+# Letting Dependabot bump them independently grows the diff against upstream and
+# turns every future sync into a conflict resolution — the opposite of what the
+# fork is arranged to do. It also opened ten pull requests that nobody was going
+# to merge, each firing three CI runs.
+#
+# GitHub Actions are ours, not upstream's, so those are still watched: the
+# workflows pin actions by commit SHA and want occasional refreshing.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: daily
-    open-pull-requests-limit: 20
-  - package-ecosystem: gradle
-    directory: "/client"
-    schedule:
-      interval: daily
-    open-pull-requests-limit: 20
+      interval: weekly
+    open-pull-requests-limit: 3

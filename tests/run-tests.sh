@@ -297,8 +297,16 @@ if command -v nginx >/dev/null 2>&1; then
         -keyout "$ngx/certs/privkey.pem" -out "$ngx/certs/fullchain.pem" \
         -subj "/CN=apps.test.invalid" >/dev/null 2>&1
     "$BIN/appstore-nginx" --cert-dir "$ngx/certs" > "$ngx/site.conf"
-    # Unprivileged ports, and no IPv6: CI runners do not always have it.
-    sed -i 's/listen 80;/listen 18080;/; s/listen 443 ssl/listen 18443 ssl/; /listen \[::\]/d' \
+    # Unprivileged ports, no IPv6 (CI runners do not always have it), and logs
+    # inside the work directory. The site config logs to /var/log/nginx, which
+    # is correct in production and unwritable for an unprivileged test run;
+    # server-level access_log wins over the http-level one below, so it has to
+    # be rewritten here rather than just overridden.
+    sed -i \
+        -e 's/listen 80;/listen 18080;/' \
+        -e 's/listen 443 ssl/listen 18443 ssl/' \
+        -e '/listen \[::\]/d' \
+        -e "s#/var/log/nginx/appstore#$ngx/appstore#" \
         "$ngx/site.conf"
     cat > "$ngx/nginx.conf" <<NGINX
 worker_processes 1;

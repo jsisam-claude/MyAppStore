@@ -1,6 +1,19 @@
 name: Validate Gradle Wrapper
 
-on: [pull_request, push]
+# Only when the wrapper itself changes. Validating an unchanged jar on every
+# push to any file is the definition of a wasted run.
+on:
+  push:
+    paths:
+      - 'client/gradle/wrapper/**'
+      - 'client/gradlew'
+      - 'client/gradlew.bat'
+      - '.github/workflows/validate-gradle-wrapper.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: gradle-wrapper-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validation:

@@ -1,6 +1,17 @@
 name: Repository scripts
 
-on: [pull_request, push]
+on:
+  push:
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - 'rom/**'
+      - '.github/workflows/scripts.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: scripts-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -13,7 +24,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Lint
-        run: shellcheck -x scripts/appstore-* scripts/lib/*.sh tests/run-tests.sh tests/fixtures/generate.sh
+        run: shellcheck -x scripts/appstore-* scripts/lib/*.sh tests/run-tests.sh tests/fixtures/generate.sh rom/import-prebuilt.sh
 
+      # Runs unprivileged, which is the point: the suite writes an nginx config
+      # and runs `nginx -t` over it, and anything the generated config needs
+      # root for is a bug in the generated config.
       - name: End-to-end self-test
         run: tests/run-tests.sh

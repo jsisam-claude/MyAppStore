@@ -1,6 +1,17 @@
 name: Build client
 
-on: [pull_request, push]
+# Push only. Pull requests in this repository come from branches in this
+# repository, so a `pull_request` trigger would just run everything twice.
+on:
+  push:
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: client-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -8,6 +19,26 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Two seconds here beats a minute and a half of Gradle. A malformed
+      # resource fails deep inside aapt2 with a message that does not say what
+      # is wrong with the file; this says it plainly. A '--' inside an XML
+      # comment is the way this has actually gone wrong before.
+      - name: Check XML resources are well-formed
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.dom.minidom as minidom
+          bad = 0
+          files = glob.glob("client/app/src/main/**/*.xml", recursive=True)
+          for path in files:
+              try:
+                  minidom.parse(path)
+              except Exception as exc:
+                  print("::error file=%s::%s" % (path, exc))
+                  bad += 1
+          print("checked %d XML resources, %d malformed" % (len(files), bad))
+          sys.exit(1 if bad else 0)
+          PY
 
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
