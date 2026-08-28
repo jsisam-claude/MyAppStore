@@ -1,16 +1,22 @@
 name: Build client
 
-# Push only. Pull requests in this repository come from branches in this
-# repository, so a `pull_request` trigger would just run everything twice.
+# Work lands through pull requests, so the PR is where checks belong. Push is
+# scoped to main for the post-merge run; without that scoping every PR would
+# run twice, once for the branch push and once for the PR.
 on:
+  pull_request:
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-build.yml'
   push:
+    branches: [main]
     paths:
       - 'client/**'
       - '.github/workflows/client-build.yml'
   workflow_dispatch:
 
 concurrency:
-  group: client-build-${{ github.ref }}
+  group: client-build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
