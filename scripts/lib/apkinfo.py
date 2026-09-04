@@ -299,20 +299,32 @@ def _signing_block_pairs(data):
 
 
 def extract_certificates(data):
-    """Returns (best_scheme_name, [certificate DER, ...]).
+    """Returns (scheme_name, [certificate DER, ...]) for the HIGHEST scheme present.
 
-    Certificates from every scheme present are unioned. When an APK has had its
-    signing key rotated, scheme v3 carries the current certificate and v2 the
-    original one, and both are legitimate signers to accept.
+    These certificates are NOT authenticated. Nothing here verifies a signature,
+    and the APK Signing Block is a bag of id-value pairs in which a verifier
+    ignores ids it does not recognise, so an entry the platform never looks at
+    can still claim any certificate at all.
+
+    Two consequences shape this function:
+
+    * Only the highest scheme block present is read. An earlier version unioned
+      v3.1, v3 and v2 to cover signing-key rotation, but Android verifies the
+      highest scheme it supports and ignores the rest, so unioning meant
+      reporting certificates out of blocks the platform never checks.
+    * Callers must treat the result as a hint. appstore-add takes its digests
+      from `apksigner verify --print-certs`, the only component in this project
+      that actually checks a signature, and falls back here only when the
+      operator explicitly opts out of verification.
+
+    A rotated lineage is therefore reported as its current signer. Accepting the
+    older certificate as well is what --allow-signer-change is for.
     """
     pairs = _signing_block_pairs(data)
-    best_scheme = None
-    certs = []
     for pair_id, scheme in SIG_BLOCK_IDS:
         if pair_id not in pairs:
             continue
-        if best_scheme is None:
-            best_scheme = scheme
+        certs = []
         for signer in _length_prefixed(_length_prefixed(pairs[pair_id])[0]):
             parts = _length_prefixed(signer, limit=1)
             if not parts:
@@ -324,7 +336,9 @@ def extract_certificates(data):
             for cert in _length_prefixed(signed_data[1]):
                 if cert not in certs:
                     certs.append(cert)
-    return best_scheme, certs
+        if certs:
+            return scheme, certs
+    return None, []
 
 
 # --------------------------------------------------------------------------
@@ -363,6 +377,9 @@ def read_apk(path):
 
     info["signatureScheme"] = scheme
     info["certDigests"] = [hashlib.sha256(cert).hexdigest() for cert in certs]
+    # Nothing above verified a signature. Say so, so that a caller cannot
+    # mistake these for authenticated digests.
+    info["certDigestsVerified"] = False
     return info
 
 
@@ -381,6 +398,7 @@ def _shell_output(info):
         ("APK_LABEL", info["label"]),
         ("APK_SIGNATURE_SCHEME", info["signatureScheme"]),
         ("APK_CERT_DIGESTS", " ".join(info["certDigests"])),
+        ("APK_CERT_DIGESTS_VERIFIED", "false"),
     ]
     return "\n".join(
         "%s=%s" % (name, shlex.quote("" if value is None else str(value)))

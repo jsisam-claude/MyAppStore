@@ -34,10 +34,13 @@ index.
 
 ## Requirements
 
-**Repository host:** bash, openssl, python3, gzip, coreutils, nginx. Android
-build-tools (`apksigner`, `aapt2`) are optional but recommended: `apksigner`
-verifies APK signatures before you publish, and `aapt2` reads app names so you
-do not have to pass `--label`.
+**Repository host:** bash, openssl, python3, gzip, coreutils, nginx, and
+Android build-tools. `apksigner` is required: the signing certificate digests
+recorded for a package are a security control, and it is the only tool here that
+verifies a signature rather than just reading one. `appstore-add
+--no-verify-signature` skips it deliberately, at the cost described in
+[docs/security.md](docs/security.md). `aapt2` is genuinely optional — it reads
+app names so you do not have to pass `--label`.
 
 **Client build:** JDK 17 or later and the Android SDK.
 

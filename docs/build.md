@@ -48,9 +48,11 @@ publishing has to run unattended, and read
 [security.md](security.md#where-the-signing-key-should-live) about where that
 key should live.
 
-**Back up `/var/lib/appstore/keys` now, before anything else.** The public key
-gets compiled into every client. Lose the private half and no device can be
-given another update until it is reflashed.
+**Back up now, before anything else — and back up both trees.** The public key
+gets compiled into every client, so losing the private half means no device can
+be given another update until it is reflashed. But keys alone do not restore a
+repository; see [Backup, restore and migration](#backup-restore-and-migration)
+below for what else has to be saved and why.
 
 ### 3. Get a certificate
 
@@ -247,6 +249,79 @@ sudo appstore-key sync && sudo nginx -t && sudo systemctl reload nginx
 
 Rarer and more disruptive. See
 [security.md](security.md#replacing-the-signing-key).
+
+---
+
+## Backup, restore and migration
+
+### What has to be saved
+
+Two directories, and both are required:
+
+| | Holds | Character |
+|---|---|---|
+| `$APPSTORE_HOME` (`/var/lib/appstore`) | config, signing key, access keys, and the `apps/` fragments that are the source of truth | small, secret |
+| `$APPSTORE_WWW` (`/var/www/appstore`) | the `.apk.gz` artifacts and icons | large, public |
+
+**Keys alone restore nothing.** The fragments record each APK's digest and
+sizes, never its content, so the `.gz` files in the web root are the only copy
+of the APK bytes anywhere in the system. And the fragments themselves cannot be
+reconstructed from a published index — descriptions, release notes and channels
+live only there.
+
+The failure mode is quiet, which is what makes it worth stating: restoring keys
+and the web root but *not* `apps/` leaves an empty `apps/` directory, and
+`appstore-publish` will happily sign and install an index containing zero
+packages. `appstore-verify` passes, because an empty index is internally
+consistent. Every device then sees an empty store.
+
+```sh
+sudo tar czf appstore-state.tar.gz -C /var/lib appstore
+sudo tar czf appstore-www.tar.gz   -C /var/www appstore
+```
+
+Take them together. A web root newer than the state, or the reverse, publishes
+an index that does not match the artifacts beside it.
+
+### Restore drill
+
+Worth doing once before you need it, on a scratch host:
+
+```sh
+export APPSTORE_HOME=/tmp/drill/state
+sudo tar xzf appstore-state.tar.gz -C /tmp/drill --strip-components=1
+sudo tar xzf appstore-www.tar.gz   -C /tmp/drill
+
+sudo appstore-list                  # the packages you expect, not zero
+sudo appstore-publish --dry-run     # every referenced artifact is present
+sudo appstore-verify                # signature and every digest re-checked
+```
+
+`appstore-verify` is the drill's real assertion: it re-verifies the Ed25519
+signature and decompresses and re-hashes every artifact, which is exactly what a
+device does. If it passes, the backup is restorable.
+
+Do **not** run `appstore-init` on a restored tree. It refuses when key material
+is present precisely because that is what a restore looks like, but the reflex
+is the dangerous one — a new key replaces the trust anchor compiled into every
+installed client.
+
+### Moving to a new host
+
+```sh
+# on the new host
+sudo tar xzf appstore-state.tar.gz -C /var/lib
+sudo tar xzf appstore-www.tar.gz   -C /var/www
+sudo appstore-nginx --install /etc/nginx/sites-available/appstore
+sudo ln -s /etc/nginx/sites-available/appstore /etc/nginx/sites-enabled/
+sudo appstore-key sync
+sudo nginx -t && sudo systemctl reload nginx
+sudo appstore-verify --remote
+```
+
+Nothing about the repository is host-specific except the nginx config and the
+TLS certificate, so the client needs no rebuild — the URL, public key and access
+key are unchanged. Point DNS at the new host once `--remote` passes.
 
 ---
 

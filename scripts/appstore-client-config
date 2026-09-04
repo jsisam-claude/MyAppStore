@@ -21,7 +21,7 @@ EOF
 want_label=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --key) want_label="${2:-}"; shift 2 ;;
+        --key) need_value "$1" $# "${2:-}"; want_label="$2"; shift 2 ;;
         -h|--help) usage 0 ;;
         *) die "unknown argument: $1 (try --help)" ;;
     esac

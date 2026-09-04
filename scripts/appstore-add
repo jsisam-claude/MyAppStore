@@ -2,8 +2,10 @@
 #
 # Add one version of one package to the repository.
 #
-# Pass the base APK plus any split APKs that belong with it. Nothing becomes
-# visible to clients until appstore-publish signs new metadata.
+# Pass the base APK plus any split APKs that belong with it. New versions become
+# visible to clients only once appstore-publish signs new metadata — but note
+# that artifacts are written straight into the served tree, so --replace of a
+# version the live index already pins is visible immediately, and is guarded.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
@@ -26,7 +28,12 @@ Options:
   --self-updating         set optOutOfBulkUpdates; use for the store's own package
   --expect-cert SHA256    require this signing certificate digest
   --allow-signer-change   accept a signer that differs from previous versions
+  --no-verify-signature   record certificate digests without verifying any
+                          signature (requires no apksigner; see docs/security.md)
   --replace               overwrite this version if it already exists
+  --force                 with --replace, overwrite even a version the live
+                          index already pins (serves a mismatched artifact
+                          until the next publish)
 EOF
     exit "${1:-1}"
 }
@@ -41,22 +48,26 @@ abis=()
 self_updating=0
 expect_cert=""
 allow_signer_change=0
+allow_unverified=0
 replace=0
+force=0
 inputs=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --label) label="${2:-}"; shift 2 ;;
-        --description) description="${2:-}"; shift 2 ;;
-        --release-notes) release_notes="${2:-}"; shift 2 ;;
-        --channel) channel="${2:-}"; shift 2 ;;
-        --source) source_name="${2:-}"; shift 2 ;;
-        --icon) icon="${2:-}"; shift 2 ;;
+        --label) need_value "$1" $# "${2:-}"; label="$2"; shift 2 ;;
+        --description) need_value "$1" $# "${2:-}"; description="$2"; shift 2 ;;
+        --release-notes) need_value "$1" $# "${2:-}"; release_notes="$2"; shift 2 ;;
+        --channel) need_value "$1" $# "${2:-}"; channel="$2"; shift 2 ;;
+        --source) need_value "$1" $# "${2:-}"; source_name="$2"; shift 2 ;;
+        --icon) need_value "$1" $# "${2:-}"; icon="$2"; shift 2 ;;
         --abi) abis+=("${2:-}"); shift 2 ;;
         --self-updating) self_updating=1; shift ;;
-        --expect-cert) expect_cert="${2:-}"; shift 2 ;;
+        --expect-cert) need_value "$1" $# "${2:-}"; expect_cert="$2"; shift 2 ;;
         --allow-signer-change) allow_signer_change=1; shift ;;
+        --no-verify-signature) allow_unverified=1; shift ;;
         --replace) replace=1; shift ;;
+        --force) force=1; shift ;;
         -h|--help) usage 0 ;;
         --) shift; inputs+=("$@"); break ;;
         -*) die "unknown option: $1 (try --help)" ;;
@@ -136,15 +147,50 @@ is_version_code "$version_code" || die "implausible versionCode: $version_code"
 
 # --- signature checks -------------------------------------------------------
 
+# The digests recorded for a package decide which signers --expect-cert and the
+# continuity check below will accept, so they have to come from something that
+# actually verified a signature. apkinfo.py only *reads* the APK Signing Block,
+# and a block can carry an entry claiming a certificate the APK was never signed
+# with. apksigner is the only component here that checks a signature, so when it
+# is present its output replaces whatever apkinfo reported.
 if command -v apksigner >/dev/null 2>&1; then
+    verified_digests=""
     for apk in "${apk_paths[@]}"; do
         apksigner verify --min-sdk-version "${min_sdk:-31}" -- "$apk" >/dev/null 2>&1 ||
             die "apksigner rejected $apk: its signature does not verify"
+
+        printed="$(apksigner verify --min-sdk-version "${min_sdk:-31}" \
+            --print-certs -- "$apk" 2>/dev/null)" ||
+            die "apksigner could not print the certificates of $apk"
+        apk_digests="$(printf '%s\n' "$printed" |
+            sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: \([0-9a-f]\{64\}\)$/\1/p' |
+            tr '\n' ' ')"
+        apk_digests="${apk_digests% }"
+        [ -n "$apk_digests" ] ||
+            die "apksigner reported no signing certificate for $apk"
+
+        if [ -z "$verified_digests" ]; then
+            verified_digests="$apk_digests"
+        elif [ "$apk_digests" != "$verified_digests" ]; then
+            die "$apk is signed by a different certificate than the other APKs; splits must share a signer"
+        fi
     done
-    detail "apksigner verified ${#apk_paths[@]} APK(s)"
+    cert_digests="$verified_digests"
+    detail "apksigner verified ${#apk_paths[@]} APK(s); digests taken from its output"
+elif [ "$allow_unverified" = 1 ]; then
+    warn "--no-verify-signature: the certificate digests below were read out of the"
+    warn "APK without checking any signature. An APK can carry a signing-block entry"
+    warn "claiming a certificate it was not signed with, so --expect-cert and the"
+    warn "signer continuity check are only as trustworthy as this APK's provenance."
 else
-    warn "apksigner is not installed, so APK signatures were read but not verified."
-    warn "Install Android build-tools for a full check before publishing."
+    die "apksigner is not on PATH, so no APK signature can be verified.
+
+    The certificate digests recorded for a package are what --expect-cert and the
+    signer continuity check compare against, and reading them out of the signing
+    block proves nothing on its own.
+
+    Install Android build-tools, or pass --no-verify-signature to record
+    unauthenticated digests deliberately."
 fi
 
 if [ -n "$expect_cert" ]; then
@@ -224,6 +270,25 @@ fi
 dest="$APPSTORE_WWW/packages/$package/$version_code"
 if [ -d "$dest" ] && [ "$replace" = 0 ]; then
     die "$package versionCode $version_code already exists. Pass --replace to overwrite it."
+fi
+
+# Artifacts are written into the served tree at the exact path the live index
+# pins. Replacing a version the current index still references means a device
+# fetching it gets bytes whose size and digest no longer match what was signed,
+# and the install fails hard. appstore-rm preserves this invariant by leaving
+# artifacts alone until publish; this is the matching guard on the add side.
+if [ "$replace" = 1 ] && [ "$force" = 0 ] && [ -f "$(metadata_path)" ]; then
+    if python3 "$LIB_DIR/sjson.py" references --file "$(metadata_path)" \
+            --package "$package" --version-code "$version_code" >/dev/null 2>&1; then
+        die "the published index still pins $package versionCode $version_code.
+
+    Overwriting its artifacts now would serve bytes that do not match the signed
+    digest until the next publish, and any device fetching that version in the
+    meantime fails to install it.
+
+    Publish a higher versionCode instead, or pass --force if the mismatch window
+    is acceptable and you will publish immediately."
+    fi
 fi
 
 mkdir -p "$dest"

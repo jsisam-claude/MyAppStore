@@ -165,6 +165,15 @@ def cmd_verify(args):
     return 1 if problems else 0
 
 
+def cmd_references(args):
+    """Exit 0 if the published document pins this package/versionCode."""
+    document = load(args.file)
+    meta = (document.get("packages") or {}).get(args.package)
+    if not meta:
+        return 1
+    return 0 if str(args.version_code) in (meta.get("variants") or {}) else 1
+
+
 def cmd_orphans(args):
     """Prints files under www/packages that the metadata does not reference."""
     document = load(args.file)
@@ -208,6 +217,12 @@ def main():
     p.add_argument("--file", required=True)
     p.add_argument("--www", required=True)
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("references", help="exit 0 if the document pins this package/versionCode")
+    p.add_argument("--file", required=True)
+    p.add_argument("--package", required=True)
+    p.add_argument("--version-code", required=True)
+    p.set_defaults(func=cmd_references)
 
     p = sub.add_parser("orphans", help="list web root files the document does not reference")
     p.add_argument("--file", required=True)
