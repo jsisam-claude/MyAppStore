@@ -1,7 +1,14 @@
 name: Repository scripts
 
 on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - 'rom/**'
+      - '.github/workflows/scripts.yml'
   push:
+    branches: [main]
     paths:
       - 'scripts/**'
       - 'tests/**'
@@ -10,7 +17,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: scripts-${{ github.ref }}
+  group: scripts-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
