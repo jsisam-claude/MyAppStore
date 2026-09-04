@@ -35,18 +35,36 @@ if [ -z "$APK_SIGNATURE_SCHEME" ]; then
     exit 1
 fi
 
-if command -v apksigner >/dev/null 2>&1; then
-    apksigner verify --min-sdk-version "${APK_MIN_SDK:-31}" -- "$apk" >/dev/null ||
-        { echo "error: apksigner rejected $apk" >&2; exit 1; }
-    if apksigner verify --print-certs "$apk" 2>/dev/null | grep -q 'CN=Android Debug'; then
-        echo "error: $apk is signed with the Android debug key. Build a release" >&2
-        echo "       APK with your own keystore; the signing key can never change." >&2
-        exit 1
-    fi
-    echo "apksigner: signature verified"
-else
-    echo "warning: apksigner is not installed; the signature was read but not verified" >&2
+# This APK becomes a privileged system app whose signing key can never change,
+# so its signer has to be established by something that verified a signature.
+# apkinfo only reads the signing block, which can claim a certificate the APK
+# was never signed with, so apksigner is required here with no opt-out.
+if ! command -v apksigner >/dev/null 2>&1; then
+    echo "error: apksigner is not on PATH." >&2
+    echo "       This APK is about to be baked into an OS image as a privileged" >&2
+    echo "       app, and its signer must be verified, not merely read." >&2
+    echo "       Install Android build-tools." >&2
+    exit 1
 fi
+
+apksigner verify --min-sdk-version "${APK_MIN_SDK:-31}" -- "$apk" >/dev/null ||
+    { echo "error: apksigner rejected $apk: its signature does not verify" >&2; exit 1; }
+
+printed="$(apksigner verify --min-sdk-version "${APK_MIN_SDK:-31}" --print-certs -- "$apk" 2>/dev/null)"
+if printf '%s\n' "$printed" | grep -q 'CN=Android Debug'; then
+    echo "error: $apk is signed with the Android debug key. Build a release" >&2
+    echo "       APK with your own keystore; the signing key can never change." >&2
+    exit 1
+fi
+
+# Replace apkinfo's unauthenticated read with apksigner's verified digests.
+APK_CERT_DIGESTS="$(printf '%s\n' "$printed" |
+    sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: \([0-9a-f]\{64\}\)$/\1/p' |
+    tr '\n' ' ')"
+APK_CERT_DIGESTS="${APK_CERT_DIGESTS% }"
+[ -n "$APK_CERT_DIGESTS" ] ||
+    { echo "error: apksigner reported no signing certificate for $apk" >&2; exit 1; }
+echo "apksigner: signature verified"
 
 mkdir -p "$(dirname "$DEST")"
 cp -- "$apk" "$DEST.tmp"

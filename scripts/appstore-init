@@ -18,6 +18,8 @@ Options:
   --auth-header NAME  access key header name (default: X-AppStore-Key)
   --no-access-key     serve without the phase 1 access key gate
   --no-passphrase     do not encrypt the signing key on disk
+  --force-new-key     generate a new signing key even though one already exists
+                      (this replaces the trust anchor pinned in every client)
 
 Environment:
   APPSTORE_HOME             repository state (default: /var/lib/appstore)
@@ -32,15 +34,17 @@ key_version="0"
 auth_header="X-AppStore-Key"
 want_access_key=1
 want_passphrase=1
+force_new_key=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --url) url="${2:-}"; shift 2 ;;
-        --www) www="${2:-}"; shift 2 ;;
-        --key-version) key_version="${2:-}"; shift 2 ;;
-        --auth-header) auth_header="${2:-}"; shift 2 ;;
+        --url) need_value "$1" $# "${2:-}"; url="$2"; shift 2 ;;
+        --www) need_value "$1" $# "${2:-}"; www="$2"; shift 2 ;;
+        --key-version) need_value "$1" $# "${2:-}"; key_version="$2"; shift 2 ;;
+        --auth-header) need_value "$1" $# "${2:-}"; auth_header="$2"; shift 2 ;;
         --no-access-key) want_access_key=0; shift ;;
         --no-passphrase) want_passphrase=0; shift ;;
+        --force-new-key) force_new_key=1; shift ;;
         -h|--help) usage 0 ;;
         *) die "unknown argument: $1 (try --help)" ;;
     esac
@@ -60,6 +64,25 @@ url="${url%/}"
 case "$www" in /*) ;; *) die "--www must be an absolute path" ;; esac
 
 [ -e "$CONFIG_FILE" ] && die "$CONFIG_FILE already exists; refusing to overwrite an existing repository"
+
+# "Keys present, config missing" is exactly what a restored backup looks like,
+# and it is the state an operator is in when load_config sends them here. The
+# public half of this key is compiled into every installed client, so generating
+# a new one would silently replace the trust anchor for the whole fleet.
+if [ "$force_new_key" = 0 ]; then
+    for existing in "$SECRET_KEY_FILE" "$PUBLIC_KEY_FILE" "$KEYID_FILE"; do
+        [ -e "$existing" ] || continue
+        die "$existing already exists.
+
+    Signing key material is present but the config is not, which is what a
+    restored backup looks like. Generating a new key here would replace the
+    public key compiled into every installed client, and no device would accept
+    another update.
+
+    Restore \$APPSTORE_HOME from backup, or pass --force-new-key if you really
+    do intend to start a new repository with a new signing key."
+    done
+fi
 
 umask 077
 mkdir -p "$APPSTORE_HOME" "$KEYS_DIR" "$APPS_DIR"

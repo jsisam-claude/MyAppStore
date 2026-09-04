@@ -40,10 +40,21 @@ SHA-256 digest in the signed index, not this field.
 
 Where they do earn their keep is on the publishing side. `appstore-add` records
 the signer of the first version of a package and refuses a later version signed
-by a different key unless you pass `--allow-signer-change`. That catches the
-mistake that would otherwise ship an update no device can install, and it
-catches an APK swapped for one built by someone else before it reaches the
-repository. `--expect-cert` makes the check explicit for a first upload.
+by a different key unless you pass `--allow-signer-change`. `--expect-cert`
+makes the check explicit for a first upload.
+
+**Those checks are only as good as the digests behind them**, which is why
+`appstore-add` requires `apksigner` and takes the digests from
+`apksigner verify --print-certs`. Reading certificates out of the APK Signing
+Block proves nothing on its own: the block is a bag of id-value pairs, a
+verifier ignores ids it does not recognise, and an entry the platform never
+looks at can still claim any certificate at all. `apksigner` is the only
+component here that actually checks a signature.
+
+`--no-verify-signature` records digests without that check. It exists for hosts
+with no Android build-tools, and it downgrades the two checks above from
+"this APK was built by the expected signer" to "this APK asserts it was".
+Prefer installing build-tools.
 
 ## Where the signing key should live
 

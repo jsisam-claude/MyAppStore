@@ -26,8 +26,8 @@ cert_dir=""
 print_pins=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --install) install_path="${2:-}"; shift 2 ;;
-        --cert-dir) cert_dir="${2:-}"; shift 2 ;;
+        --install) need_value "$1" $# "${2:-}"; install_path="$2"; shift 2 ;;
+        --cert-dir) need_value "$1" $# "${2:-}"; cert_dir="$2"; shift 2 ;;
         --print-pins) print_pins=1; shift ;;
         -h|--help) usage 0 ;;
         *) die "unknown argument: $1 (try --help)" ;;

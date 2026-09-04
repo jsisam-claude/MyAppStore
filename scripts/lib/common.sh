@@ -60,6 +60,28 @@ detail() { printf '%s%s%s\n' "$_c_dim" "$*" "$_c_off" >&2; }
 warn() { printf '%swarning:%s %s\n' "$_c_yellow" "$_c_off" "$*" >&2; }
 die() { printf '%serror:%s %s\n' "$_c_red" "$_c_off" "$*" >&2; exit 1; }
 
+# Option arms are written `opt="${2:-}"; shift 2`. With the option supplied
+# last, `shift 2` returns non-zero, set -e kills the script, and nothing is
+# printed at all. Call this before consuming the value so the option names
+# itself instead.
+#
+#   --label) need_value "$1" $#; label="$2"; shift 2 ;;
+#
+# The lookalike-value check is deliberately limited to options whose values come
+# from a fixed set. A free-text option must be able to take "-1 regression".
+need_value() {
+    if [ "$2" -lt 2 ]; then
+        die "$1 needs a value"
+    fi
+    case "$1" in
+        --channel|--source|--abi|--key|--cert-dir|--key-version|--auth-header)
+            case "${3:-}" in
+                -?*) die "$1 needs a value, but got the option $3" ;;
+            esac
+            ;;
+    esac
+}
+
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1${2:+ ($2)}"
 }
@@ -80,7 +102,11 @@ tmpfile() { mktemp "$TMP_DIR/${1:-tmp}.XXXXXX"; }
 # Parsed rather than sourced: the config file should be data, not code.
 load_config() {
     [ -f "$CONFIG_FILE" ] ||
-        die "$CONFIG_FILE not found. Run appstore-init first (or set APPSTORE_HOME)."
+        die "$CONFIG_FILE not found.
+    For a new repository: appstore-init
+    Restoring an existing one: put \$APPSTORE_HOME back from backup rather than
+    re-running appstore-init, which would generate a new signing key.
+    Wrong repository? Set APPSTORE_HOME."
 
     local line key value
     while IFS= read -r line || [ -n "$line" ]; do

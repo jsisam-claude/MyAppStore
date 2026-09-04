@@ -28,9 +28,18 @@ URL="https://apps.test.invalid"
 
 passed=0
 failed=0
+skipped=0
 
 ok()   { passed=$((passed + 1)); printf '  ok    %s\n' "$1"; }
 bad()  { failed=$((failed + 1)); printf '  FAIL  %s\n' "$1"; }
+# A check that could not run is reported, never silently omitted: a suite that
+# prints a full pass after skipping a section is worse than one that fails.
+skip() { skipped=$((skipped + 1)); printf '  SKIP  %s (%s)\n' "$1" "$2"; }
+
+# Most checks exercise repository mechanics rather than signature verification,
+# and must behave identically whether or not Android build-tools are installed.
+# They opt out explicitly; the verification path has its own checks below.
+add() { "$BIN/appstore-add" --no-verify-signature "$@"; }
 
 check() { # description command...
     local description="$1"; shift
@@ -68,11 +77,31 @@ check_eq "public key is tagged Ed" "Ed" "$(printf '%s' "$pubkey" | base64 -d | h
 check "re-initialising is refused" \
     bash -c '! "$0" --url "$1" --www "$2" --no-passphrase' "$BIN/appstore-init" "$URL" "$WWW"
 
+# A restored backup is "keys present, config missing". Generating a new key
+# there would replace the public key compiled into every installed client.
+cp "$APPSTORE_HOME/config" "$WORK/config.bak"
+rm -f "$APPSTORE_HOME/config"
+check_fails "init refuses when key material already exists" \
+    "$BIN/appstore-init" --url "$URL" --www "$WWW" --no-passphrase
+check "the signing key was left untouched" test -f "$APPSTORE_HOME/keys/repo.sec.pem"
+check_eq "and the public key is unchanged" "$pubkey" "$(cat "$APPSTORE_HOME/keys/repo.pub")"
+cp "$WORK/config.bak" "$APPSTORE_HOME/config"
+
+# A missing option value used to kill the script with no output at all.
+check "a missing option value names the option" bash -c '
+    out="$("$1" --url 2>&1 || true)"
+    case "$out" in *"--url needs a value"*) exit 0 ;; *) printf "got: %s\n" "$out"; exit 1 ;; esac
+' _ "$BIN/appstore-init"
+check "an enumerated option rejects a lookalike value" bash -c '
+    out="$("$1" --channel --label x /dev/null 2>&1 || true)"
+    case "$out" in *"--channel needs a value"*) exit 0 ;; *) exit 1 ;; esac
+' _ "$BIN/appstore-add"
+
 # ---------------------------------------------------------------------------
 section "add"
 
 check "add base plus split with an icon" \
-    "$BIN/appstore-add" --label "Fixture App" --description "A test package" \
+    add --label "Fixture App" --description "A test package" \
         --icon "$FIXTURES/icon.png" \
         "$FIXTURES/v42/base.apk" "$FIXTURES/v42/split_config.hdpi.apk"
 
@@ -94,19 +123,44 @@ check_eq "split is named the way the client parses splits" "1" \
        grep -c '^split_config\.hdpi\.apk$')"
 
 check_fails "adding the same version again is refused" \
-    "$BIN/appstore-add" --label "Fixture App" "$FIXTURES/v42/base.apk"
+    add --label "Fixture App" "$FIXTURES/v42/base.apk"
 
 check "--replace allows overwriting" \
-    "$BIN/appstore-add" --label "Fixture App" --replace \
+    add --label "Fixture App" --replace \
         "$FIXTURES/v42/base.apk" "$FIXTURES/v42/split_config.hdpi.apk"
 
 check_fails "a version signed by a different key is refused" \
-    "$BIN/appstore-add" --label "Fixture App" "$FIXTURES/other-signer/base.apk"
+    add --label "Fixture App" "$FIXTURES/other-signer/base.apk"
+
+# Certificate digests are what --expect-cert and the continuity check compare
+# against, so recording ones nothing authenticated is a security bug, not a
+# convenience. Without apksigner the command must refuse rather than warn.
+if command -v apksigner >/dev/null 2>&1; then
+    skip "refuses to record unverified digests without an opt-out" "apksigner is installed"
+else
+    check_fails "refuses to record unverified digests without an opt-out" \
+        "$BIN/appstore-add" --label "Fixture App" --replace "$FIXTURES/v42/base.apk"
+fi
+
+# And when apksigner IS available, the digests must come from it rather than
+# from apkinfo's unauthenticated read of the signing block.
+if command -v apksigner >/dev/null 2>&1; then
+    check "digests come from apksigner when it is available" \
+        "$BIN/appstore-add" --label "Fixture App" --replace \
+            "$FIXTURES/v42/base.apk" "$FIXTURES/v42/split_config.hdpi.apk"
+    check_eq "and they match the fixture's real signer" \
+        "2d6f2139268c154c7f80c015c4616db3aee0f8f54f295f27f43a03ef65577539" \
+        "$(python3 "$BIN/lib/fragment.py" get \
+            --file "$APPSTORE_HOME/apps/com.example.fixture/package.json" --key signatures)"
+else
+    skip "digests come from apksigner when it is available" "apksigner not installed"
+    skip "and they match the fixture's real signer" "apksigner not installed"
+fi
 
 # A malformed APK has to fail as a clear error, not a Python traceback.
 head -c 900 "$FIXTURES/v42/base.apk" > "$WORK/truncated.apk"
 check_fails "a truncated APK is refused" \
-    "$BIN/appstore-add" --label "Broken" "$WORK/truncated.apk"
+    add --label "Broken" "$WORK/truncated.apk"
 check "the truncated APK produces a clean error, not a traceback" bash -c '
     output="$(python3 "$1/lib/apkinfo.py" "$2" 2>&1 || true)"
     case "$output" in
@@ -117,18 +171,18 @@ check "the truncated APK produces a clean error, not a traceback" bash -c '
 ' _ "$BIN" "$WORK/truncated.apk"
 
 check_fails "--expect-cert mismatch is refused" \
-    "$BIN/appstore-add" --label "Fixture App" \
+    add --label "Fixture App" \
         --expect-cert 0000000000000000000000000000000000000000000000000000000000000000 \
         "$FIXTURES/v43/base.apk"
 
 check "add a second version" \
-    "$BIN/appstore-add" --label "Fixture App" --channel beta \
+    add --label "Fixture App" --channel beta \
         --release-notes "Second test version" "$FIXTURES/v43/base.apk"
 
 # Updating should not mean retyping the app's name every time.
 "$BIN/appstore-rm" com.example.fixture 43 --yes >/dev/null 2>&1
 check "a new version can be added without --label" \
-    "$BIN/appstore-add" --replace --channel beta "$FIXTURES/v43/base.apk"
+    add --replace --channel beta "$FIXTURES/v43/base.apk"
 check_eq "it inherits the label from the previous version" "Fixture App" \
     "$(python3 "$BIN/lib/fragment.py" get \
         --file "$APPSTORE_HOME/apps/com.example.fixture/variants/43.json" --key label)"
@@ -222,6 +276,17 @@ check_fails "verify catches a corrupted artifact" bash -c '
 ' _ "$WWW" "$WORK" "$BIN"
 
 check "verify passes again once the artifact is restored" "$BIN/appstore-verify"
+
+# ---------------------------------------------------------------------------
+section "replace guard"
+
+# Artifacts live at the path the signed index pins, so replacing a published
+# version serves bytes that no longer match the signed digest.
+check_fails "--replace is refused once the index pins that version" \
+    add --label "Fixture App" --replace "$FIXTURES/v42/base.apk"
+check "--force overrides it deliberately" \
+    add --label "Fixture App" --replace --force "$FIXTURES/v42/base.apk"
+check "the repository still verifies afterwards" "$BIN/appstore-verify"
 
 # ---------------------------------------------------------------------------
 section "timestamp monotonicity"
@@ -361,7 +426,7 @@ check "init with a passphrase succeeds" \
 check "the key is encrypted on disk" \
     grep -q "ENCRYPTED PRIVATE KEY" "$APPSTORE_HOME/keys/repo.sec.pem"
 check "add works against the second repository" \
-    "$BIN/appstore-add" --label "Fixture App" "$FIXTURES/v42/base.apk"
+    add --label "Fixture App" "$FIXTURES/v42/base.apk"
 check "publish works with the passphrase from the environment" "$BIN/appstore-publish"
 check "the result verifies" "$BIN/appstore-verify"
 
@@ -369,5 +434,9 @@ check_fails "publishing with the wrong passphrase fails" \
     env APPSTORE_KEY_PASSPHRASE=wrong "$BIN/appstore-publish"
 
 # ---------------------------------------------------------------------------
-printf '\n%d passed, %d failed\n' "$passed" "$failed"
+if [ "$skipped" -gt 0 ]; then
+    printf '\n%d passed, %d failed, %d skipped\n' "$passed" "$failed" "$skipped"
+else
+    printf '\n%d passed, %d failed\n' "$passed" "$failed"
+fi
 [ "$failed" -eq 0 ]
