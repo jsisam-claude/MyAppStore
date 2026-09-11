@@ -29,7 +29,7 @@ index.
 | `client/` | The forked Android client. See [`client/UPSTREAM.md`](client/UPSTREAM.md) for exactly what was changed and how to sync upstream. |
 | `scripts/` | `appstore-*`, the repository management commands. |
 | `rom/` | Bundling the client into a GrapheneOS build as a prebuilt privileged app. See [`rom/README.md`](rom/README.md). |
-| `docs/` | [Security model](docs/security.md), [metadata format](docs/metadata-format.md), [accounts, MDM and SSO](docs/accounts-and-sso.md). |
+| `docs/` | [Security model](docs/security.md), [metadata format](docs/metadata-format.md), [accounts, MDM and SSO](docs/accounts-and-sso.md), [open quality backlog](docs/quality-round-2.md). |
 | `tests/` | End-to-end tests against real signed APK fixtures. |
 
 ## Requirements
